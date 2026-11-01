@@ -18,16 +18,16 @@ def test_config_and_add(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> N
     root = str(tmp_path / "index")
     tarball = str(build_collection(tmp_path / "a.tar.gz"))
 
-    assert main(["--root", root, "config", "--no-plugins"]) == 0
-    assert main(["--root", root, "add", tarball, "--published", "2026-11-01T00:00:00Z"]) == 0
-    assert main(["--root", root, "add", tarball]) == 0
+    assert main(["config", "--root", root, "--no-plugins"]) == 0
+    assert main(["add", "--root", root, tarball, "--published", "2026-11-01T00:00:00Z"]) == 0
+    assert main(["add", tarball, "--root", root]) == 0
 
     assert capsys.readouterr().out == "added ns.coll 1.0.0\nns.coll 1.0.0 is already in the index\n"
     assert '"published":"2026-11-01T00:00:00Z"' in (tmp_path / "index" / "index" / "ns" / "coll.jsonl").read_text()
 
 
 def test_error(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    assert main(["--root", str(tmp_path), "add", "a.tar.gz"]) == 1
+    assert main(["add", "--root", str(tmp_path), "a.tar.gz"]) == 1
     assert capsys.readouterr().err.startswith("error: ")
 
 
@@ -59,10 +59,23 @@ def test_complete_root_directories(tmp_path: Path) -> None:
     (work / "indexes").mkdir(parents=True)
     (work / "index.txt").touch()
 
-    assert complete(tmp_path, "alai-index --root ind", cwd=work) == ["indexes/"]
+    assert complete(tmp_path, "alai-index add --root ind", cwd=work) == ["indexes/"]
 
 
 @pytest.mark.parametrize("shell", SHELLS)
 def test_generate_shell_completion(capsys: pytest.CaptureFixture[str], shell: str) -> None:
     assert main(["generate-shell-completion", shell]) == 0
     assert "alai-index" in capsys.readouterr().out
+
+
+def test_set_and_remove(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    root = str(tmp_path / "index")
+    main(["config", "--root", root])
+    main(["add", "--root", root, str(build_collection(tmp_path / "a.tar.gz"))])
+    capsys.readouterr()
+
+    assert main(["set", "--root", root, "ns.coll", "--yanked"]) == 0
+    assert main(["set", "--root", root, "ns.coll:1.0.0", "--yanked"]) == 0
+    assert main(["remove", "--root", root, "ns.coll"]) == 0
+
+    assert capsys.readouterr().out == ("updated ns.coll 1.0.0\nns.coll 1.0.0 is unchanged\nremoved ns.coll 1.0.0\n")

@@ -52,6 +52,25 @@ def _add(args: argparse.Namespace) -> int:
     return 0
 
 
+def _set(args: argparse.Namespace) -> int:
+    from . import _index as index
+
+    for changed in index.Index(args.root).set(args.targets, yanked=args.yanked, deprecated=args.deprecated):
+        if changed.changed:
+            print(f"updated {changed.name} {changed.version}")
+        else:
+            print(f"{changed.name} {changed.version} is unchanged")
+    return 0
+
+
+def _remove(args: argparse.Namespace) -> int:
+    from . import _index as index
+
+    for removed in index.Index(args.root).remove(args.targets):
+        print(f"removed {removed.name} {removed.version}")
+    return 0
+
+
 def _generate_shell_completion(args: argparse.Namespace) -> int:
     from argcomplete.shell_integration import shellcode
 
@@ -64,20 +83,30 @@ def _complete(parser: argparse.ArgumentParser) -> None:
     from argcomplete import autocomplete
     from argcomplete.completers import DirectoriesCompleter
 
-    for action in parser._actions:
-        if action.metavar == "DIR":
-            action.completer = DirectoriesCompleter()  # pyright: ignore[reportAttributeAccessIssue]
+    def set_completers(parser: argparse.ArgumentParser) -> None:
+        for action in parser._actions:
+            if action.metavar == "DIR":
+                action.completer = DirectoriesCompleter()  # pyright: ignore[reportAttributeAccessIssue]
+            elif isinstance(action, argparse._SubParsersAction):
+                for subparser in action.choices.values():  # pyright: ignore[reportUnknownVariableType]
+                    set_completers(subparser)
+
+    set_completers(parser)
     # sys.exit rather than argcomplete's default os._exit, so exit handlers such as coverage's still run.
     autocomplete(parser, exit_method=sys.exit)
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="alai-index", description="Build and operate an alai index on disk.")
-    parser.add_argument("--root", default=".", metavar="DIR", help="the index's directory, the current one by default")
     commands = parser.add_subparsers(title="commands", metavar="COMMAND", required=True)
+
+    # Options every command that works on an index takes.
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--root", default=".", metavar="DIR", help="the index's directory, the current one by default")
 
     config = commands.add_parser(
         "config",
+        parents=[common],
         help="write config.json",
         description=(
             "Write config.json. An option left out keeps what it says now, or takes the default. "
@@ -108,6 +137,7 @@ def _parser() -> argparse.ArgumentParser:
 
     add = commands.add_parser(
         "add",
+        parents=[common],
         help="add collection artifacts",
         description="Add collection artifacts. Each version is read from its MANIFEST.json and meta/runtime.yml.",
     )
@@ -116,6 +146,32 @@ def _parser() -> argparse.ArgumentParser:
         "--published", metavar="TIME", help="when they were first published, RFC 3339 in UTC, now by default"
     )
     add.set_defaults(func=_add)
+
+    target_help = "a collection, for every version of it, or one version as NS.NAME:VERSION"
+    set_ = commands.add_parser(
+        "set",
+        parents=[common],
+        help="yank or deprecate versions",
+        description="Change whether versions are yanked or deprecated, the only things about a version that can change.",
+    )
+    set_.add_argument("targets", nargs="+", metavar="NS.NAME[:VERSION]", help=target_help)
+    set_.add_argument(
+        "--yanked",
+        action=argparse.BooleanOptionalAction,
+        help="whether they're yanked, so only used when locked",
+    )
+    set_.add_argument("--deprecated", action=argparse.BooleanOptionalAction, help="whether they're deprecated")
+    set_.set_defaults(func=_set)
+
+    remove = commands.add_parser(
+        "remove",
+        parents=[common],
+        help="take versions down",
+        description="Take versions down, deleting their lines and artifacts. It's refused if a version that stays, and "
+        + "isn't yanked, would be left without a version it needs. Yank those first, or remove them too.",
+    )
+    remove.add_argument("targets", nargs="+", metavar="NS.NAME[:VERSION]", help=target_help)
+    remove.set_defaults(func=_remove)
 
     completion = commands.add_parser(
         "generate-shell-completion",

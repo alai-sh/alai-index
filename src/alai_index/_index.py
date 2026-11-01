@@ -12,8 +12,10 @@ is the caller's, everything but ``plugins.jsonl`` and ``collections.json`` first
 from __future__ import annotations
 
 import collections.abc as _c
+import contextlib
 import datetime as dt
 import hashlib
+import json
 import os
 import posixpath
 import tempfile
@@ -23,7 +25,7 @@ import uuid
 
 from alai_core import artifact, collection
 from alai_core.index import CollectionEntry, CollectionIndex, Collections, CollectionVersion, Config
-from alai_core.semver import Version
+from alai_core.semver import Version, VersionReq
 
 from . import _plugins as plugins
 
@@ -47,6 +49,15 @@ class Added(_t.NamedTuple):
     sha256: str
     added: bool
     """False if the index already had it, with the same artifact."""
+
+
+class Changed(_t.NamedTuple):
+    """A version ``Index.set`` or ``Index.remove`` was asked to change."""
+
+    name: str
+    version: str
+    changed: bool
+    """False if it already was as asked."""
 
 
 def now() -> str:
@@ -120,12 +131,34 @@ def _has_collections(tree: Index) -> bool:
     if tree.config.collections is not None:
         data = _read(tree.file(tree.config.collections))
         return data is not None and len(Collections.parse(data)) > 0
-    # Without a listing, index files are found by name, below the template's fixed directory.
-    top = tree.file(tree.config.index.split("{", 1)[0] or ".")
-    known = {os.path.join(tree.root, "config.json")}
-    if tree.config.plugins is not None:
-        known.add(tree.file(tree.config.plugins))
-    return any(os.path.join(d, f) not in known for d, _, files in os.walk(top) for f in files)
+    return next(tree._unlisted(), None) is not None
+
+
+def _target(text: str) -> tuple[str, str | None]:
+    """``NS.NAME`` or ``NS.NAME:VERSION``, checked."""
+    name, sep, version = text.partition(":")
+    try:
+        collection.check_name(name)
+        if sep:
+            Version(version)
+    except ValueError as e:
+        raise Error(f"{text!r}: {e}") from None
+    return name, version if sep else None
+
+
+def _met(req: VersionReq, lines: _c.Iterable[CollectionVersion]) -> bool:
+    """Whether a version that isn't yanked meets the requirement."""
+    return any(not line.yanked and req.contains(line.version) for line in lines)
+
+
+def _with(line: CollectionVersion, *, yanked: bool | None, deprecated: bool | None) -> CollectionVersion:
+    """The line with these fields changed, kept as read otherwise, even a requirement it can't read."""
+    data = json.loads(line.to_json(allow_unreadable=True))
+    if yanked is not None:
+        data["yanked"] = yanked
+    if deprecated is not None:
+        data["deprecated"] = deprecated
+    return CollectionIndex.parse(json.dumps(data).encode(), line.name).lines[0]
 
 
 class _Staged(_t.NamedTuple):
@@ -232,9 +265,7 @@ class Index:
             for dep, req in s.line.deps:
                 if dep not in lines and dep not in others:
                     others[dep] = self._lines(dep, listing)
-                if not any(
-                    not d.yanked and req.contains(d.version) for d in (lines[dep] if dep in lines else others[dep])
-                ):
+                if not _met(req, lines[dep] if dep in lines else others[dep]):
                     raise Error(
                         f"{s.line.name} {s.line.version.text} needs {dep} {req.text}, "
                         + "which no version in the index that isn't yanked meets"
@@ -243,18 +274,146 @@ class Index:
             return results
 
         touched = {s.line.name: lines[s.line.name] for s in new}
-        private: dict[str, dict[str, dict[str, object]]] = {}
-        plugin_index = None
-        if self.config.plugins is not None:
-            path = self.file(self.config.plugins)
-            plugin_index = _read(path)
-            if plugin_index is None:
-                raise Error(f"{path} is missing, which config.json says the index has")
-            private = {name: self._private(name, before[name]) for name in touched}
+        plugin_index, private = self._plugin_state(before, touched)
+        if private is not None:
             for s in new:
                 private[s.line.name][s.line.version.text] = _t.cast("dict[str, object]", s.extraction)
-        self._write(new, touched, listing, private, plugin_index)
+        self._commit(
+            touched, listing, artifacts=[(s.line, s.data) for s in new], private=private, plugin_index=plugin_index
+        )
         return results
+
+    def set(
+        self, targets: _c.Sequence[str], /, *, yanked: bool | None = None, deprecated: bool | None = None
+    ) -> list[Changed]:
+        """Change whether versions are yanked or deprecated, the only fields of a line that may change.
+
+        Args:
+            targets: Each ``NS.NAME``, for every version of the collection, or ``NS.NAME:VERSION``.
+            yanked: Yank or unyank them, or None to leave it.
+            deprecated: Deprecate them or not, or None to leave it.
+
+        Returns:
+            Each version the targets name, in order.
+
+        Raises:
+            Error: Nothing to change was given, or a target isn't in the index. Nothing is written.
+        """
+        if yanked is None and deprecated is None:
+            raise Error("there's nothing to change")
+        listing = self._listing()
+        lines: dict[str, list[CollectionVersion]] = {}
+        results: list[Changed] = []
+        touched: set[str] = set()
+        for name, i in self._select(targets, listing, lines):
+            old = lines[name][i]
+            lines[name][i] = _with(old, yanked=yanked, deprecated=deprecated)
+            changed = lines[name][i] != old
+            results.append(Changed(name, old.version.text, changed))
+            if changed:
+                touched.add(name)
+        if touched:
+            # Plugin lines count yanked and deprecated versions too, so they stay as they are.
+            self._commit({name: lines[name] for name in touched}, listing)
+        return results
+
+    def remove(self, targets: _c.Sequence[str], /) -> list[Changed]:
+        """Take versions down: their lines, artifacts and private lines are deleted, and with a collection's last, its
+        index file and listing entry.
+
+        It's refused if a version that stays, and isn't yanked, would be left without a version it needs, which a
+        takedown mustn't do to an index. Yank those first, or remove them too.
+
+        Args:
+            targets: Each ``NS.NAME``, for every version of the collection, or ``NS.NAME:VERSION``.
+
+        Returns:
+            Each version removed, in order.
+
+        Raises:
+            Error: A target isn't in the index, or the removal would leave a dependency unmet. Nothing is written.
+        """
+        listing = self._listing()
+        lines: dict[str, list[CollectionVersion]] = {}
+        selected = self._select(targets, listing, lines)
+        before = {name: list(have) for name, have in lines.items()}
+        gone = [before[name][i] for name, i in selected]
+        for name in lines:
+            lines[name] = [line for line in lines[name] if line not in gone]
+
+        unmet: list[str] = []
+        for _, others in self._everything(listing, lines):
+            for line in others:
+                if line.yanked or line.problem is not None:
+                    continue
+                for dep, req in line.deps:
+                    # Only what the removal breaks. A mirror can hold a requirement nothing ever met.
+                    if dep in lines and _met(req, before[dep]) and not _met(req, lines[dep]):
+                        unmet.append(f"{line.name} {line.version.text} needs {dep} {req.text}")
+        if unmet:
+            raise Error(
+                "removing them would leave versions that aren't yanked without a version they need. "
+                + f"Yank these first, or remove them too. {', '.join(unmet)}"
+            )
+
+        plugin_index, private = self._plugin_state(before, lines)
+        if private is not None:
+            for name, extractions in private.items():
+                private[name] = {line.version.text: extractions[line.version.text] for line in lines[name]}
+        self._commit(lines, listing, private=private, plugin_index=plugin_index, removed=gone)
+        return [Changed(line.name, line.version.text, True) for line in gone]
+
+    def _select(
+        self, targets: _c.Sequence[str], listing: Collections | None, lines: dict[str, list[CollectionVersion]]
+    ) -> list[tuple[str, int]]:
+        """Each version the targets name, as its collection and position in ``lines``, which gets each one's lines."""
+        selected: dict[tuple[str, int], None] = {}
+        for text in targets:
+            name, version = _target(text)
+            if name not in lines:
+                lines[name] = self._lines(name, listing)
+            matches = [i for i, line in enumerate(lines[name]) if version in (None, line.version.text)]
+            if not matches:
+                raise Error(f"{name} {version} isn't in the index" if version else f"{name} isn't in the index")
+            selected.update(dict.fromkeys((name, i) for i in matches))
+        return list(selected)
+
+    def _everything(
+        self, listing: Collections | None, lines: dict[str, list[CollectionVersion]]
+    ) -> _c.Iterator[tuple[str, list[CollectionVersion]]]:
+        """Every collection in the index and its lines, taking those in ``lines`` from there."""
+        names = list(listing) if listing is not None else [name for name, _ in self._unlisted()]
+        for name in names:
+            yield name, lines[name] if name in lines else self._lines(name, listing)
+
+    def _unlisted(self) -> _c.Iterator[tuple[str, str]]:
+        """Each collection with an index file, and that file, found without a listing, so by name, below the index
+        template's fixed directory."""
+        top = self.file(self.config.index.split("{", 1)[0] or ".")
+        for d, dirs, files in os.walk(top):
+            dirs[:] = [x for x in dirs if os.path.join(d, x) != os.path.join(self.root, PRIVATE)]
+            for f in files:
+                path = os.path.join(d, f)
+                first = (_read(path) or b"").split(b"\n", 1)[0]
+                try:
+                    name = json.loads(first)["name"]
+                    found = self.file(self.config.index_path(name=name))
+                except (ValueError, KeyError, TypeError, Error):
+                    continue
+                if found == path:
+                    yield name, path
+
+    def _plugin_state(
+        self, before: dict[str, list[CollectionVersion]], touched: _c.Iterable[str]
+    ) -> tuple[bytes | None, dict[str, dict[str, dict[str, object]]] | None]:
+        """``plugins.jsonl`` and the touched collections' private lines, or None for each without a plugin index."""
+        if self.config.plugins is None:
+            return None, None
+        path = self.file(self.config.plugins)
+        plugin_index = _read(path)
+        if plugin_index is None:
+            raise Error(f"{path} is missing, which config.json says the index has")
+        return plugin_index, {name: self._private(name, before[name]) for name in touched}
 
     def _stage(self, path: str, tmp: str, published: str) -> _Staged:
         """Read and check an artifact, and make its line and extraction."""
@@ -346,37 +505,53 @@ class Index:
             raise Error(f"{path} has no extraction for {name} {', '.join(missing)}")
         return {line.version.text: parsed[line.version.text] for line in have}
 
-    def _write(
+    def _commit(
         self,
-        new: list[_Staged],
         lines: dict[str, list[CollectionVersion]],
         listing: Collections | None,
-        private: dict[str, dict[str, dict[str, object]]],
-        plugin_index: bytes | None,
+        *,
+        artifacts: _c.Sequence[tuple[CollectionVersion, bytes]] = (),
+        private: dict[str, dict[str, dict[str, object]]] | None = None,
+        plugin_index: bytes | None = None,
+        removed: _c.Sequence[CollectionVersion] = (),
     ) -> None:
-        for s in new:
-            _write(self.artifact_file(s.line), s.data)
-        for name, extractions in private.items():
-            _write(
-                self.private_file(name), plugins.private_jsonl(extractions[line.version.text] for line in lines[name])
-            )
+        """Write a change to the collections in ``lines``, given their new lines, in the order that never leaves the
+        index naming a file that isn't there. Artifacts and private files, then index files, ``plugins.jsonl`` and
+        ``collections.json``, and last deleting what ``removed`` and collections left with no lines leave behind."""
+        for line, data in artifacts:
+            _write(self.artifact_file(line), data)
+        for name, extractions in (private or {}).items():
+            if lines[name]:
+                jsonl = plugins.private_jsonl(extractions[line.version.text] for line in lines[name])
+                _write(self.private_file(name), jsonl)
 
         updated = now()
         entries: dict[str, CollectionEntry] = {}
         for name, collection_lines in lines.items():
-            data = CollectionIndex(name, collection_lines).to_jsonl().encode()
-            sha256 = hashlib.sha256(data).hexdigest()
-            _write(self.file(self.config.index_path(name=name, sha256=sha256)), data)
-            entries[name] = CollectionEntry(updated, sha256)
+            if collection_lines:
+                # Lines added are checked before this, so only lines already there can have a problem, kept as they are.
+                data = CollectionIndex(name, collection_lines).to_jsonl(allow_unreadable=True).encode()
+                sha256 = hashlib.sha256(data).hexdigest()
+                _write(self.file(self.config.index_path(name=name, sha256=sha256)), data)
+                entries[name] = CollectionEntry(updated, sha256)
 
-        if plugin_index is not None and self.config.plugins is not None:
+        if plugin_index is not None and private is not None and self.config.plugins is not None:
             changed = {name: plugins.plugin_lines(name, extractions) for name, extractions in private.items()}
             _write(self.file(self.config.plugins), plugins.merge(plugin_index, changed))
 
         if listing is not None and self.config.collections is not None:
-            merged = {name: e for name in listing if (e := listing.get(name)) is not None}
+            merged = {name: e for name in listing if (e := listing.get(name)) is not None and lines.get(name) != []}
             merged.update(entries)
             _write(self.file(self.config.collections), Collections(merged).to_json().encode())
+
+        for line in removed:
+            _remove(self.artifact_file(line))
+        for name, collection_lines in lines.items():
+            if not collection_lines:
+                _remove(self.private_file(name))
+                # One found by sha256 stays, for clients with an older listing, until the caller deletes it.
+                if not self.config.hashed:
+                    _remove(self.file(self.config.index_path(name=name)))
 
 
 def _read(path: str) -> bytes | None:
@@ -385,6 +560,11 @@ def _read(path: str) -> bytes | None:
             return f.read()
     except FileNotFoundError:
         return None
+
+
+def _remove(path: str) -> None:
+    with contextlib.suppress(FileNotFoundError):
+        os.unlink(path)
 
 
 def _write(path: str, data: bytes) -> None:
