@@ -1,0 +1,37 @@
+{
+    "basedpyright.analysis.extraPaths": [
+        "src",
+    ],
+    "basedpyright.analysis.ignore": ["tests"],
+    "basedpyright.analysis.typeCheckingMode": "recommended",
+    "editor.rulers": [
+        88,
+        120
+    ],
+    "files.trimTrailingWhitespace": true,
+    // Directories tools write, which VS Code needn't watch: .tox alone is ~17,000 directories, and watching
+    // them uses up the user's inotify watches (fs.inotify.max_user_watches).
+    "files.watcherExclude": {
+        "**/.cache/**": true,
+        "**/.tox/**": true,
+        "**/.venv/**": true,
+        "**/dist/**": true,
+        "**/scratch/**": true
+    },
+    "editor.trimAutoWhitespace": true,
+    "ruff.importStrategy": "fromEnvironment",
+    "mypy-type-checker.ignorePatterns": ["*"],
+    "python.languageServer": "None",
+    "python.testing.pytestArgs": [
+        "tests"
+    ],
+    "python.testing.unittestEnabled": false,
+    "python.testing.pytestEnabled": true,
+    "[python]": {
+        "editor.defaultFormatter": "charliermarsh.ruff",
+        "editor.formatOnSave": true,
+        "editor.codeActionsOnSave": {
+            "source.organizeImports": "explicit"
+        },
+    },
+}

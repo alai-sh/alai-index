@@ -1,0 +1,189 @@
+name: Alai Index CI
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      # A version tag also drafts its GitHub release, with the sdist and wheel. Publishing that draft publishes to PyPI
+      # (publish.yml). git tag -a v1.0.0 -m "v1.0.0" && git push origin v1.0.0
+      - 'v*'
+
+  pull_request:
+    branches:
+      - main
+
+permissions: {}
+
+env:
+  UV_VERSION: "0.13.6"
+
+jobs:
+  sanity:
+    name: Sanity
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read  # Repo checkout
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+          cache-suffix: sanity
+
+      - name: Check uv.lock is up to date
+        run: uv lock --check
+
+      - name: Run sanity checks
+        run: |
+          uv sync --no-install-project
+          uv run --no-sync tox run -f sanity
+
+  build:
+    name: Build
+    needs: sanity
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read  # Repo checkout
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+          cache-suffix: build
+
+      # alai-index is pure Python, so one wheel serves every platform.
+      - name: Build
+        run: uv build
+
+      - name: Verify tag matches project version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          PROJECT_VERSION="$(tar -xzOf dist/*.tar.gz --wildcards '*/PKG-INFO' | sed -n 's/^Version: //p')"
+          if [ "${GITHUB_REF_NAME}" != "v${PROJECT_VERSION}" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match project version ${PROJECT_VERSION}"
+            exit 1
+          fi
+
+      - name: Smoke test
+        run: uv run --isolated --no-project --with ./dist/*.whl alai-index --help
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  test:
+    name: Test (${{ matrix.runner }}, Python ${{ matrix.python-version }})
+    needs: build
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read  # Repo checkout
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        # Every Python on x86_64, and elsewhere the oldest and newest and both free-threaded builds. Windows arm64
+        # starts at 3.11, the first CPython for it.
+        include:
+          - {runner: ubuntu-26.04, python-version: "3.10"}
+          - {runner: ubuntu-26.04, python-version: "3.11"}
+          - {runner: ubuntu-26.04, python-version: "3.12"}
+          - {runner: ubuntu-26.04, python-version: "3.13"}
+          - {runner: ubuntu-26.04, python-version: "3.14"}
+          - {runner: ubuntu-26.04, python-version: "3.15"}
+          - {runner: ubuntu-26.04, python-version: "3.14t"}
+          - {runner: ubuntu-26.04, python-version: "3.15t"}
+          - {runner: ubuntu-26.04-arm, python-version: "3.10"}
+          - {runner: ubuntu-26.04-arm, python-version: "3.15"}
+          - {runner: ubuntu-26.04-arm, python-version: "3.14t"}
+          - {runner: ubuntu-26.04-arm, python-version: "3.15t"}
+          - {runner: macos-latest, python-version: "3.10"}
+          - {runner: macos-latest, python-version: "3.15"}
+          - {runner: macos-latest, python-version: "3.14t"}
+          - {runner: macos-latest, python-version: "3.15t"}
+          - {runner: windows-latest, python-version: "3.10"}
+          - {runner: windows-latest, python-version: "3.15"}
+          - {runner: windows-latest, python-version: "3.14t"}
+          - {runner: windows-latest, python-version: "3.15t"}
+          - {runner: windows-11-arm, python-version: "3.11"}
+          - {runner: windows-11-arm, python-version: "3.15"}
+          - {runner: windows-11-arm, python-version: "3.14t"}
+          - {runner: windows-11-arm, python-version: "3.15t"}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+          cache-suffix: test-${{ matrix.python-version }}
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist/
+
+      - name: Run tests
+        run: |
+          TOX_PYTHON="py$(echo "${PYTHON_VERSION}" | tr -d .)"
+          # tox and the tools only, not alai-index, which is the wheel given.
+          uv sync --no-install-project
+          uv run --no-sync tox run -f "${TOX_PYTHON}" --installpkg dist/alai_index-*.whl
+        env:
+          PYTHON_VERSION: ${{ matrix.python-version }}
+          PYTEST_ADDOPTS: --color=yes
+
+  draft:
+    name: Draft release
+    needs:
+      - test
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: write  # Create the draft release
+      id-token: write  # Sigstore signing certificate, for the attestations
+      attestations: write  # Store the attestations
+      artifact-metadata: write  # The attestations' storage records
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: dist/
+          merge-multiple: true
+
+      # publish.yml only uploads files these attestations show were built here from the tag.
+      - name: Attest the sdist and wheels
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/*
+
+      - name: Create or update the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if is_draft="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>/dev/null)"; then
+            if [ "$is_draft" != "true" ]; then
+              echo "::error::Release $TAG is already published, its assets cannot be changed. Release a new version instead."
+              exit 1
+            fi
+
+            gh release upload "$TAG" dist/* --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$TAG" dist/* \
+              --draft \
+              --verify-tag \
+              --title "$TAG" \
+              --generate-notes \
+              --repo "$GITHUB_REPOSITORY"
+          fi

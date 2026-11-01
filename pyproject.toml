@@ -1,0 +1,188 @@
+[build-system]
+requires = ["uv_build >= 0.9, < 0.14"]
+build-backend = "uv_build"
+
+[project]
+name = "alai-index"
+version = "0.1.0"
+description = "Builds and operates alai indexes."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Jordan Borean" }]
+requires-python = ">=3.10"
+keywords = ["alai", "ansible", "collections", "galaxy", "index"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "Programming Language :: Python :: 3",
+    "Typing :: Typed",
+]
+
+dependencies = [
+    "argcomplete >= 3.5.2",
+    # A commit of alai-core's repository until it's on PyPI, given here rather than in [tool.uv.sources] so installs
+    # from GitHub or the sdist find it too.
+    "alai-core @ git+https://github.com/alai-sh/alai-core@eb18167e081db4f6a6bde297c28b1216896b42b6",
+]
+
+[project.scripts]
+alai-index = "alai_index._cli:main"
+
+[project.urls]
+Source = "https://github.com/alai-sh/alai-index"
+Issues = "https://github.com/alai-sh/alai-index/issues"
+
+[dependency-groups]
+test = [
+    "pytest >= 8",
+    "pytest-xdist",
+]
+dev = [
+    { include-group = "test" },
+    "basedpyright >= 1.40.2",
+    "coverage[toml] >= 5.3",  # Support for source_pkgs
+    "ruff >= 0.17.0",
+    "pre-commit",
+    "tox-uv",
+]
+
+[tool.uv]
+# Reinstall on any source change, not only on pyproject.toml.
+cache-keys = [
+    { file = "pyproject.toml" },
+    { file = "src/**/*.py" },
+]
+
+[tool.basedpyright]
+include = ["src", "tests"]
+pythonVersion = "3.10"
+reportAny = false
+# typing.override needs 3.12.
+reportImplicitOverride = false
+reportPrivateUsage = false
+reportUnannotatedClassAttribute = false
+reportUnknownArgumentType = false
+reportUnknownMemberType = false
+# A call's unused result needs no _ = to say so.
+reportUnusedCallResult = false
+
+executionEnvironments = [
+    # pytest fixtures are parameters a test may not use.
+    { root = "tests", reportUntypedFunctionDecorator = false, reportUnusedParameter = false },
+]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = [
+    "A",
+    "B",
+    "C4",
+    "DTZ",
+    "E4",
+    "E7",
+    "E9",
+    "F",
+    "FURB",
+    "G",
+    "I",
+    "ICN",
+    "ISC",
+    "PERF",
+    "PIE",
+    "PTH",
+    "RET",
+    "RSE",
+    "RUF",
+    "S",
+    "SIM",
+    "T20",
+    "UP",
+    "W",
+]
+
+ignore = [
+    # Conflicts with basedpyright's reportImplicitStringConcatenation.
+    "ISC003",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "RUF012"]
+# pathlib's import cost would land on every run.
+"src/**" = ["PTH"]
+"src/alai_index/_cli.py" = ["T201"]
+
+[tool.ruff.lint.flake8-import-conventions]
+banned-from = ["typing", "collections.abc"]
+
+[tool.ruff.lint.flake8-import-conventions.extend-aliases]
+"typing" = "_t"
+"collections.abc" = "_c"
+
+[tool.ruff.lint.isort]
+known-first-party = ["alai_index"]
+
+[tool.pytest.ini_options]
+addopts = "--import-mode=importlib"
+pythonpath = ["tests"]
+testpaths = "tests"
+junit_family = "xunit2"
+
+[tool.coverage.paths]
+source = ["src", ".tox/py*/**/site-packages"]
+
+[tool.coverage.run]
+branch = true
+# The tests run from another directory.
+data_file = "${PROJECT_ROOT}/.coverage"
+disable_warnings = ["module-not-imported", "no-data-collected"]
+source_pkgs = ["alai_index"]
+parallel = true
+
+[tool.coverage.report]
+skip_covered = true
+show_missing = true
+
+[tool.tox]
+legacy_tox_ini = """
+[tox]
+env_list =
+    sanity
+    py3{10,11,12,13,14,15}-tests
+    py3{14,15}t-tests
+min_version = 4.0
+
+[testenv]
+package = wheel
+wheel_build_env = .pkg
+runner = uv-venv-lock-runner
+
+passenv =
+    PYTEST_ADDOPTS
+
+set_env =
+    tests: COVERAGE_PROCESS_START={toxinidir}/pyproject.toml
+    tests: PROJECT_ROOT={toxinidir}
+
+commands_pre =
+    # Not {env_site_packages_dir}, which misses the "t" in a free-threaded build's lib/python3.14t.
+    tests: python -c 'import pathlib, sysconfig; pathlib.Path(sysconfig.get_path("purelib"), "cov.pth").write_text("import coverage; coverage.process_startup()")'
+
+commands =
+    sanity: python -m ruff check .
+    sanity: python -m ruff format . --check
+    sanity: python -m basedpyright --warnings
+    tests: python -m coverage run -m pytest -v {posargs:-n auto}
+
+commands_post =
+    tests: python -m coverage combine --quiet
+    tests: python -m coverage report
+    tests: python -m coverage xml
+
+[testenv:sanity]
+base_python = py315
+"""
