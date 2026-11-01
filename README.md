@@ -8,8 +8,8 @@ tree of files on disk. Publishing the tree, to a web server, a bucket or
 anywhere else, is up to you.
 
 ```console
-$ alai-index --root my-index config
-$ alai-index --root my-index add ns-coll-1.0.0.tar.gz ns-dep-2.1.0.tar.gz
+$ alai-index config --root my-index
+$ alai-index add --root my-index ns-coll-1.0.0.tar.gz ns-dep-2.1.0.tar.gz
 added ns.coll 1.0.0
 added ns.dep 2.1.0
 $ python -m http.server -d my-index
@@ -21,9 +21,12 @@ $ python -m http.server -d my-index
 |---|---|
 | `config [--index TEMPLATE] [--dl TEMPLATE] [--[no-]listing] [--[no-]plugins]` | Write `config.json`. An option left out keeps what it says now, or takes the default, which is index files by name (`index/{namespace}/{name}.jsonl`), artifacts in the tree (`dl/{sha256-prefix}/{sha256-checksum}.tar.gz`), a `collections.json` listing and a `plugins.jsonl` plugin index. It can't change once the index has collections |
 | `add TARBALL... [--published TIME]` | Add collection artifacts. Each version is read from its own `MANIFEST.json` and `meta/runtime.yml`. A version already in the index with the same artifact is skipped, and one with another artifact is refused. Every dependency must be met by a version in the index, or among the tarballs, that isn't yanked |
+| `set NS.NAME[:VERSION]... [--[no-]yanked] [--[no-]deprecated]` | Change whether versions are yanked or deprecated, the only things about a version that can change. `NS.NAME` alone is every version of it. A yanked version stays installable when a lock file pins it, and is skipped otherwise |
+| `remove NS.NAME[:VERSION]...` | Take versions down, deleting their lines, artifacts and plugin entries. Lock files pinning them stop working. It's refused if a version that stays, and isn't yanked, would be left without a version it needs. Yank those first, or remove them too |
 | `generate-shell-completion SHELL` | Print the script that enables Tab completion. See [Shell completion](#shell-completion) |
 
-`--root DIR` is the index's directory, the current one by default.
+`config` and `add` take `--root DIR`, the index's directory, the current
+one by default.
 
 ## Shell completion
 
