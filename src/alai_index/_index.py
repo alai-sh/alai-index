@@ -11,8 +11,10 @@ import contextlib
 import datetime as dt
 import hashlib
 import json
+import logging
 import os
 import posixpath
+import re
 import tempfile
 import typing as _t
 import urllib.parse
@@ -22,12 +24,16 @@ from alai_core import artifact, collection
 from alai_core.index import CollectionEntry, CollectionIndex, Collections, CollectionVersion, Config
 from alai_core.semver import Version, VersionReq
 
+from . import _galaxy as galaxy
 from . import _plugins as plugins
 
 DEFAULT_INDEX = "index/{namespace}/{name}.jsonl"
 DEFAULT_DL = "dl/{sha256-prefix}/{sha256-checksum}.tar.gz"
 COLLECTIONS = "collections.json"
 PLUGINS = "plugins.jsonl"
+log = logging.getLogger("alai_index")
+"""Progress, at info, and each decision, at debug. Warnings a caller should act on are ``Index.warnings``."""
+
 PRIVATE = "private"
 """The private directory's name in the tree, when it isn't given."""
 
@@ -37,17 +43,25 @@ class Error(Exception):
 
 
 class Change(_t.NamedTuple):
-    """A version a command was given, and what happened to it."""
+    """A version a command was given, and what happened to it, as README.md's "Results" lists them."""
 
     name: str
-    version: str
+    version: str | None
+    """None for the whole collection."""
     result: str
-    """``added`` or ``exists`` from ``add``, ``changed`` or ``unchanged`` from ``set``, ``removed`` from ``remove``, and
-    ``extracted`` from ``rebuild``."""
-    sha256: str | None = None
-    """The artifact's, from ``add``."""
-    error: str | None = None
-    """Why extracting its plugins failed, from ``rebuild``."""
+    """``added``, ``exists``, ``changed``, ``unchanged``, ``removed``, ``extracted``, ``conflict``, ``failed`` or
+    ``deferred``."""
+    details: dict[str, object] | None = None
+    """What there is to say about the result, by result."""
+
+
+def _changed(old: CollectionVersion, new: CollectionVersion) -> dict[str, object]:
+    """The fields that may change, as ``new`` has them, where they differ from ``old``."""
+    return {k: getattr(new, k) for k in ("yanked", "deprecated") if getattr(new, k) != getattr(old, k)}
+
+
+def _failed(name: str, version: str | None, kind: str, error: str) -> Change:
+    return Change(name, version, "failed", {"kind": kind, "error": error})
 
 
 SKIPPABLE_CHECKS = ("dependencies", "requirements")
@@ -269,6 +283,73 @@ def _jsonl(lines: _c.Iterable[_c.Mapping[str, object]]) -> bytes:
     return "".join(json.dumps(line, separators=(",", ":")) + "\n" for line in lines).encode()
 
 
+def _changes(name: str, before: list[CollectionVersion], after: list[CollectionVersion]) -> list[Change]:
+    """A ``changed`` for each version in ``before`` whose fields that may change differ in ``after``."""
+    old = {line.version.text: line for line in before}
+    return [
+        Change(name, line.version.text, "changed", changed)
+        for line in after
+        if line.version.text in old and (changed := _changed(old[line.version.text], line))
+    ]
+
+
+class _Mirrored(_t.NamedTuple):
+    lines: list[CollectionVersion]
+    extractions: dict[str, dict[str, object]]
+    """Each version added's plugin extraction."""
+    downloads: int
+
+
+def _count(n: int, thing: str) -> str:
+    return f"{n} {thing}" if n == 1 else f"{n} {thing}s"
+
+
+def _read_session(path: str | os.PathLike[str]) -> dict[str, dict[str, object]]:
+    """The listings a ``galaxy_mirror`` session file keeps, or none if there's no file yet."""
+    data = _read(os.fspath(path))
+    if data is None:
+        return {}
+    listings: object = None
+    try:
+        session: object = json.loads(data)
+        if isinstance(session, dict) and _t.cast("dict[str, object]", session).get("v") == 1:
+            listings = _t.cast("dict[str, object]", session).get("collections")
+    except ValueError:
+        pass
+    if not isinstance(listings, dict):
+        raise Error(f"{os.fspath(path)} isn't a galaxy-mirror session file")
+    return _t.cast("dict[str, dict[str, object]]", listings)
+
+
+def _served_sha256(detail: _c.Mapping[str, object]) -> str | None:
+    """A version detail's ``artifact.sha256``, or None if the server didn't give one."""
+    artifact = detail.get("artifact")
+    sha256 = _t.cast("dict[str, object]", artifact).get("sha256") if isinstance(artifact, dict) else None
+    return sha256 if isinstance(sha256, str) else None
+
+
+def _valid_name(name: str) -> bool:
+    try:
+        collection.check_name(name)
+    except ValueError:
+        return False
+    return True
+
+
+def _rfc3339(value: object) -> str | None:
+    """A server's timestamp as the index writes one, RFC 3339 in UTC to the second, or None if it isn't one."""
+    if not isinstance(value, str):
+        return None
+    # The index keeps whole seconds, and Python 3.10 reads only 3 or 6 digits of a fraction.
+    try:
+        when = dt.datetime.fromisoformat(re.sub(r"\.\d+", "", value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=dt.timezone.utc)
+    return when.astimezone(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 class _Staged(_t.NamedTuple):
     line: CollectionVersion
     data: bytes
@@ -376,9 +457,10 @@ class Index:
         published = published or now()
         listing = self._listing()
         with tempfile.TemporaryDirectory(prefix="alai-index-", ignore_cleanup_errors=True) as tmp:
-            staged = [
-                self._stage(os.fspath(t), os.path.join(tmp, str(i)), published, skip) for i, t in enumerate(tarballs)
-            ]
+            staged: list[_Staged] = []
+            for i, tarball in enumerate(tarballs):
+                log.info("reading %s", os.fspath(tarball))
+                staged.append(self._stage(os.fspath(tarball), os.path.join(tmp, str(i)), published, skip))
 
         lines: dict[str, list[CollectionVersion]] = {}
         before: dict[str, list[CollectionVersion]] = {}
@@ -393,7 +475,7 @@ class Index:
             existing = next((line for line in have if line.version == s.line.version), None)
             if existing is not None and existing.sha256 != s.line.sha256:
                 raise Error(f"{name} {vers} is already in the index with another artifact, sha256 {existing.sha256}")
-            results.append(Change(name, vers, "added" if existing is None else "exists", sha256=s.line.sha256))
+            results.append(Change(name, vers, "added" if existing is None else "exists", {"sha256": s.line.sha256}))
             if existing is None:
                 have.append(s.line)
                 new.append(s)
@@ -417,7 +499,7 @@ class Index:
         for s in new:
             if s.extraction is not None and (error := s.extraction.get("error")):
                 self.warnings.append(
-                    f"{s.line.name} {s.line.version.text}: extracting its plugins failed, so the plugin index has "
+                    f"extracting the plugins of {s.line.name} {s.line.version.text} failed, so the plugin index has "
                     + f"none of them. {error}"
                 )
 
@@ -470,10 +552,11 @@ class Index:
             i = next(i for i, line in enumerate(lines[name]) if line.version.text == version)
             old = lines[name][i]
             lines[name][i] = _with(old, yanked=yanked, deprecated=deprecated)
-            changed = lines[name][i] != old
-            results.append(Change(name, version, "changed" if changed else "unchanged"))
-            if changed:
+            if changed := _changed(old, lines[name][i]):
+                results.append(Change(name, version, "changed", changed))
                 touched.add(name)
+            else:
+                results.append(Change(name, version, "unchanged"))
         if touched:
             # Plugin lines count yanked and deprecated versions too, so they stay as they are.
             self._commit({name: lines[name] for name in touched}, listing, public_listing=commit)
@@ -524,7 +607,7 @@ class Index:
         self._commit(
             lines, listing, extractions=extractions, plugin_index=plugin_index, removed=gone, public_listing=commit
         )
-        return [Change(line.name, line.version.text, "removed") for line in gone]
+        return [Change(line.name, line.version.text, "removed", {"sha256": line.sha256}) for line in gone]
 
     def rebuild(
         self,
@@ -604,6 +687,8 @@ class Index:
                 for n, state in enumerate(states):
                     version = _t.cast(str, state["version"])
                     again = from_artifacts and (name, version) in wanted
+                    if again:
+                        log.info("reading the artifact of %s %s", name, version)
                     dest = self._unpack(name, state, os.path.join(tmp, f"{i}-{n}")) if again else None
                     if do_index:
                         old = cached.get(version)
@@ -625,11 +710,11 @@ class Index:
                             else plugins.failure(version, dest)
                         )
                         error = _t.cast("str | None", found[version].get("error"))
-                        results.append(Change(name, version, "extracted", error=error))
+                        results.append(Change(name, version, "extracted", {"error": error} if error else None))
                         if error:
                             self.warnings.append(
-                                f"{name} {version}: extracting its plugins failed, so the plugin index has none of "
-                                + f"them. {error}"
+                                f"extracting the plugins of {name} {version} failed, so the plugin index has none "
+                                + f"of them. {error}"
                             )
                 if do_index:
                     lines[name] = collection_lines
@@ -665,6 +750,271 @@ class Index:
             public_listing=do_index,
         )
         return results
+
+    def galaxy_mirror(
+        self,
+        client: galaxy.GalaxyClient,
+        targets: _c.Sequence[str] = (),
+        /,
+        *,
+        everything: bool = False,
+        limit: int | None = None,
+        revalidate: bool = False,
+        commit: bool = True,
+        session: str | os.PathLike[str] | None = None,
+    ) -> list[Change]:
+        """Bring collections in line with a Galaxy server, through the v3 endpoints ansible-galaxy uses.
+
+        For each collection, versions the server lists and the index doesn't have are added, oldest upload first, with
+        ``published`` from the server's ``created_at``, and their artifacts checked against its sha256. They're copied as
+        published, so the ``dependencies`` and ``requirements`` checks warn rather than refuse. A version is yanked only
+        when its own page, or the collection's, is a 404, so a listing that's cut short can never yank anything, and a
+        yanked one the server lists again is checked and unyanked. A version the index has is checked against the
+        server's sha256 when it's yanked, its ``created_at`` differs from ``published``, or with ``revalidate``. Other
+        bytes are a ``conflict``, never written. The collection's ``deprecated`` goes on every line.
+
+        A failure is reported for its version, and the rest go on.
+
+        Args:
+            client: The server.
+            targets: Each ``NS.NAME``.
+            everything: Every collection the server lists or the index has, in place of targets.
+            limit: The most versions to download. Those left, and the collections after, are ``deferred``.
+            revalidate: Check every version the index has against the server's sha256.
+            commit: As for ``add``.
+            session: A file to carry on from, if it's there, and to write what's needed to carry on to. A collection
+                ``limit`` leaves part done is kept there with what the server said of it, so the next run only
+                downloads. It's for runs close together, against the same server, and its contents are internal to
+                alai-index.
+
+        Returns:
+            What happened to each version.
+
+        Raises:
+            Error: The options conflict, a target isn't a collection name, or the server can't be listed.
+        """
+        if targets and everything:
+            raise Error("give collections or --all, not both")
+        if not targets and not everything:
+            raise Error("name collections, or --all for every one")
+        listing = self._listing()
+        if everything:
+            try:
+                log.info("listing the collections on %s", client.server)
+                served = [f"{c.get('namespace')}.{c.get('name')}" for c in client.collections()]
+            except galaxy.GalaxyError as e:
+                raise Error(f"the collections can't be listed. {e}") from None
+            names = sorted({n for n in served if _valid_name(n)} | set(listing))
+        else:
+            names = []
+            for text in targets:
+                name, version = _target(text)
+                if version is not None:
+                    raise Error(f"{text!r}: galaxy-mirror takes collections, not versions")
+                names.append(name)
+
+        results: list[Change] = []
+        lines: dict[str, list[CollectionVersion]] = {}
+        new: dict[str, dict[str, dict[str, object]]] = {}
+        downloads = 0
+        listings = _read_session(session) if session is not None else {}
+        # Checked before any download, as artifacts are written as they come.
+        haves = {name: self._lines(name, listing) for name in names}
+        plugin_index, extractions = self._plugin_state(haves, haves, commit=commit)
+        with tempfile.TemporaryDirectory(prefix="alai-index-", ignore_cleanup_errors=True) as tmp:
+            for i, (name, have) in enumerate(haves.items()):
+                if limit is not None and downloads >= limit:
+                    results.append(Change(name, None, "deferred"))
+                    continue
+                mirrored = self._mirror_collection(
+                    client, name, have, revalidate, limit, downloads, tmp, i, results, listings
+                )
+                downloads += mirrored.downloads
+                if mirrored.lines != have:
+                    lines[name] = mirrored.lines
+                if mirrored.extractions:
+                    new[name] = mirrored.extractions
+        if session is not None:
+            data = {"v": 1, "collections": listings}
+            _write(os.fspath(session), json.dumps(data, separators=(",", ":")).encode())
+
+        if not lines:
+            log.info("nothing to write")
+            return results
+        log.info("writing the changes to %s", _count(len(lines), "collection"))
+        if extractions is not None:
+            merged = {name: extractions[name] | found for name, found in new.items()}
+            extractions = {
+                name: {line.version.text: merged[name][line.version.text] for line in lines[name]} for name in new
+            }
+        self._commit(lines, listing, extractions=extractions, plugin_index=plugin_index, public_listing=commit)
+        return results
+
+    def _mirror_collection(
+        self,
+        client: galaxy.GalaxyClient,
+        name: str,
+        have: list[CollectionVersion],
+        revalidate: bool,
+        limit: int | None,
+        downloads: int,
+        tmp: str,
+        n: int,
+        results: list[Change],
+        listings: dict[str, dict[str, object]],
+    ) -> _Mirrored:
+        """One collection's part of ``galaxy_mirror``. A collection left with versions to download keeps what the
+        server said of it in ``listings``, for the session, and one in it is carried on from."""
+        namespace, short = name.split(".", 1)
+        lines = list(have)
+        saved: dict[str, object] | None = None if revalidate else listings.get(name)
+        if saved is None:
+            log.info("%s, asking the server for its versions", name)
+            try:
+                served = client.collection(namespace, short)
+                upstream = client.versions(namespace, short) if served is not None else []
+            except galaxy.GalaxyError as e:
+                results.append(_failed(name, None, e.kind, str(e)))
+                self.warnings.append(f"mirroring {name} failed with {e.kind}. {e}")
+                return _Mirrored(lines, {}, 0)
+
+            if served is None:
+                listings.pop(name, None)
+                lines = [_with(line, yanked=True) for line in lines]
+                results.extend(_changes(name, have, lines))
+                return _Mirrored(lines, {}, 0)
+
+            listed: dict[str, str | None] = {}
+            for v in upstream:
+                version = v.get("version")
+                try:
+                    Version(_t.cast(str, version))
+                except (TypeError, ValueError):
+                    self.warnings.append(
+                        f"the server lists {version!r} for {name}, which isn't a version, so it's left out"
+                    )
+                    continue
+                listed[_t.cast(str, version)] = _rfc3339(v.get("created_at"))
+            saved = {
+                "name": name,
+                "updated_at": served.get("updated_at"),
+                "deprecated": bool(served.get("deprecated")),
+                "versions": listed,
+            }
+            resumed = False
+        else:
+            log.info("%s, carrying on from the versions the server listed earlier", name)
+            listed = _t.cast("dict[str, str | None]", saved["versions"])
+            resumed = True
+
+        by_version = {line.version.text: i for i, line in enumerate(lines)}
+        missing = sorted(set(listed) - set(by_version), key=lambda v: (listed[v] or "", Version(v)))
+        log.info("%s has %s on the server, %d not in the index yet", name, _count(len(listed), "version"), len(missing))
+        extractions: dict[str, dict[str, object]] = {}
+        done = 0
+        deferred = False
+        # Oldest upload first, so a collection mirrored over several runs keeps its lines in publication order.
+        for version in missing:
+            if limit is not None and downloads + done >= limit:
+                results.append(Change(name, version, "deferred"))
+                deferred = True
+                continue
+            done += 1
+            log.info("downloading %s %s, %d of %d", name, version, done, len(missing))
+            staged = self._mirror_version(client, name, version, listed[version], os.path.join(tmp, f"{n}-{done}"))
+            if isinstance(staged, Change):
+                results.append(staged)
+                details = staged.details or {}
+                self.warnings.append(
+                    f"mirroring {name} {version} failed with {details.get('kind')}. {details.get('error')}"
+                )
+                continue
+            line, extraction = staged
+            lines.append(line)
+            if extraction is not None:
+                extractions[version] = extraction
+            results.append(Change(name, version, "added", {"sha256": line.sha256}))
+
+        if deferred:
+            if not resumed:
+                listings[name] = saved
+        else:
+            listings.pop(name, None)
+        if resumed:
+            # Checked against the server when it was listed. The next fresh listing checks it again.
+            return _Mirrored(lines, extractions, done)
+
+        for version, i in by_version.items():
+            line = lines[i]
+            if version in listed:
+                if line.yanked or listed[version] != line.published or revalidate:
+                    lines[i] = self._mirror_recheck(client, name, line, results)
+            elif not line.yanked:
+                try:
+                    client.version(namespace, short, version)
+                except galaxy.NotFound:
+                    lines[i] = _with(line, yanked=True)
+                except galaxy.GalaxyError as e:
+                    results.append(_failed(name, version, e.kind, str(e)))
+                    self.warnings.append(f"mirroring {name} {version} failed with {e.kind}. {e}")
+
+        deprecated = bool(saved["deprecated"])
+        lines = [_with(line, deprecated=deprecated) if line.deprecated != deprecated else line for line in lines]
+        # One entry for each version already in the index whose yanked or deprecated changed, with all it changed.
+        results.extend(_changes(name, have, lines))
+        return _Mirrored(lines, extractions, done)
+
+    def _mirror_version(
+        self, client: galaxy.GalaxyClient, name: str, version: str, created: str | None, tmp: str
+    ) -> tuple[CollectionVersion, dict[str, object] | None] | Change:
+        """Download and stage a version the index doesn't have, writing its artifact, or why it failed."""
+        namespace, short = name.split(".", 1)
+        try:
+            detail = client.version(namespace, short, version)
+            sha256, url = _served_sha256(detail), detail.get("download_url")
+            if not isinstance(url, str) or not isinstance(sha256, str):
+                return _failed(name, version, "bad_detail", "no download_url or artifact sha256")
+            data = client.download(url)
+        except galaxy.GalaxyError as e:
+            return _failed(name, version, e.kind, str(e))
+        if (got := hashlib.sha256(data).hexdigest()) != sha256:
+            return _failed(name, version, "sha256_mismatch", f"got {got}, not {sha256}")
+        os.makedirs(tmp)
+        path = os.path.join(tmp, "download.tar.gz")
+        _write(path, data)
+        published = _rfc3339(detail.get("created_at")) or created or now()
+        try:
+            staged = self._stage(path, os.path.join(tmp, "stage"), published, SKIPPABLE_CHECKS)
+        except Error as e:
+            return _failed(name, version, "bad_artifact", str(e))
+        if (staged.line.name, staged.line.version.text) != (name, version):
+            what = f"{staged.line.name} {staged.line.version.text}"
+            return _failed(name, version, "manifest_mismatch", f"its MANIFEST.json is for {what}")
+        if staged.extraction is not None and (error := staged.extraction.get("error")):
+            self.warnings.append(
+                f"extracting the plugins of {name} {version} failed, so the plugin index has none of them. {error}"
+            )
+        # Written now rather than at the commit, so a long run holds no more than one artifact at a time.
+        self._write("artifact", self.artifact_file(staged.line), data, name)
+        return staged.line, staged.extraction
+
+    def _mirror_recheck(
+        self, client: galaxy.GalaxyClient, name: str, line: CollectionVersion, results: list[Change]
+    ) -> CollectionVersion:
+        """Check a version the index has against the server's sha256, unyanking it if it's served again."""
+        namespace, short = name.split(".", 1)
+        version = line.version.text
+        try:
+            detail = client.version(namespace, short, version)
+        except galaxy.GalaxyError as e:
+            results.append(_failed(name, version, e.kind, str(e)))
+            self.warnings.append(f"mirroring {name} {version} failed with {e.kind}. {e}")
+            return line
+        sha256 = _served_sha256(detail)
+        if sha256 != line.sha256:
+            # Never written over: the caller decides what another artifact for a published version means.
+            results.append(Change(name, version, "conflict", {"sha256": sha256, "url": detail.get("download_url")}))
+        return _with(line, yanked=False) if line.yanked else line
 
     def _unpack(self, name: str, state: _c.Mapping[str, object], tmp: str) -> str | artifact.ExtractError:
         """Unpack a version's artifact, checked against its state, into ``tmp``. If alai-core refuses one it once
@@ -797,7 +1147,7 @@ class Index:
             except collection.MetadataError as e:
                 if "requirements" not in skip:
                     raise
-                self.warnings.append(f"{where}: {e}")
+                self.warnings.append(f"{where} has a requirement ansible-core can't read. {e}")
                 deps = _raw_deps(meta, where)
             requires_ansible = None
             runtime_data = _read(os.path.join(dest, "meta", "runtime.yml"))
@@ -809,7 +1159,7 @@ class Index:
                 except collection.MetadataError as e:
                     if "requirements" not in skip:
                         raise
-                    self.warnings.append(f"{where}: {e}")
+                    self.warnings.append(f"{where} has a requirement ansible-core can't read. {e}")
                     value = runtime.requires_ansible
                     requires_ansible = value if isinstance(value, str) else None
             line = CollectionVersion(
@@ -925,6 +1275,26 @@ class Index:
             )
         return {v: parsed[v] for v in versions if v in parsed}
 
+    def _note(self, event: str, group: str, path: str, name: str | None) -> None:
+        """Record a file written or deleted in ``files``, and its collection as changed."""
+        if group == "artifact":
+            dl = urllib.parse.urlsplit(self.config.dl)
+            group = "dl" if dl.scheme or dl.netloc else "index"
+        bases = {"dl": _dl_dir(self.root, self.dl), "index": self.root, "private": self.private}
+        self.files[event][group].append(os.path.relpath(path, bases[group]).replace(os.sep, "/"))
+        # Only a collection whose own files changed, so a batch commits no more than it has to.
+        if name is not None and name not in self.files["collections"]:
+            self.files["collections"].append(name)
+
+    def _write(self, group: str, path: str, data: bytes, name: str | None = None) -> None:
+        if _write_changed(path, data):
+            self._note("written", group, path, name)
+
+    def _remove(self, group: str, path: str, name: str | None = None) -> None:
+        if os.path.exists(path):
+            _remove(path)
+            self._note("deleted", group, path, name)
+
     def _commit(
         self,
         lines: dict[str, list[CollectionVersion]],
@@ -944,30 +1314,7 @@ class Index:
         lines leave behind. A file whose bytes wouldn't change isn't written. Without ``plugin_index``,
         ``plugins.jsonl`` isn't written, and without ``public_listing``, neither is ``collections.json``.
         """
-        dl_parts = urllib.parse.urlsplit(self.config.dl)
-        remote_dl = bool(dl_parts.scheme or dl_parts.netloc)
-        bases = {"dl": _dl_dir(self.root, self.dl), "index": self.root, "private": self.private}
-
-        def note(event: str, group: str, path: str) -> None:
-            if group == "artifact":
-                group = "dl" if remote_dl else "index"
-            self.files[event][group].append(os.path.relpath(path, bases[group]).replace(os.sep, "/"))
-
-        def collection_changed(name: str | None) -> None:
-            # Only a collection whose own files changed, so a batch commits no more than it has to.
-            if name is not None and name not in self.files["collections"]:
-                self.files["collections"].append(name)
-
-        def write(group: str, path: str, data: bytes, name: str | None = None) -> None:
-            if _write_changed(path, data):
-                note("written", group, path)
-                collection_changed(name)
-
-        def remove(group: str, path: str, name: str | None = None) -> None:
-            if os.path.exists(path):
-                _remove(path)
-                note("deleted", group, path)
-                collection_changed(name)
+        write, remove = self._write, self._remove
 
         for line, data in artifacts:
             write("artifact", self.artifact_file(line), data, line.name)

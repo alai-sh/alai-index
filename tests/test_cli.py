@@ -78,7 +78,7 @@ def test_set_and_remove(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> N
     assert main(["set", "--root", root, "ns.coll:1.0.0", "--yanked"]) == 0
     assert main(["remove", "--root", root, "ns.coll"]) == 0
 
-    assert capsys.readouterr().out == ("updated ns.coll 1.0.0\nns.coll 1.0.0 is unchanged\nremoved ns.coll 1.0.0\n")
+    assert capsys.readouterr().out == ("yanked ns.coll 1.0.0\nns.coll 1.0.0 is unchanged\nremoved ns.coll 1.0.0\n")
 
 
 def test_rebuild(tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch) -> None:
@@ -97,7 +97,10 @@ def test_rebuild(tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch
     assert main(["rebuild", "--root", root, "--all", "--files", "plugins", "--from-artifacts"]) == 0
     captured = capsys.readouterr()
     assert captured.out == "re-extracted ns.coll 1.0.0\n"
-    assert captured.err.startswith("warning: ns.coll 1.0.0: extracting its plugins failed")
+    assert captured.err.splitlines() == [
+        "reading the artifact of ns.coll 1.0.0",
+        "warning: extracting the plugins of ns.coll 1.0.0 failed, so the plugin index has none of them. ValueError: boom",
+    ]
 
 
 def test_private(tmp_path: Path) -> None:
@@ -137,5 +140,7 @@ def test_warning_color(tmp_path: Path, capsys: pytest.CaptureFixture[str], monke
 
     assert main(["add", "--root", root, "--skip-checks", "dependencies", tarball]) == 0
     captured = capsys.readouterr()
-    assert captured.err.startswith("\x1b[1;33mwarning\x1b[0m\x1b[1m:\x1b[0m \x1b[1mns.coll 1.0.0 needs")
+    assert captured.err.splitlines()[-1].startswith(
+        "\x1b[1;33mwarning\x1b[0m\x1b[1m:\x1b[0m \x1b[1mns.coll 1.0.0 needs"
+    )
     assert captured.out == "added ns.coll 1.0.0\n"  # Only stderr is coloured.
