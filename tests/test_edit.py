@@ -37,7 +37,7 @@ def root(tmp_path: Path) -> Path:
 
 
 def test_set_one_version(root: Path) -> None:
-    assert index.Index(root).set(["ns.coll:1.0.0"], yanked=True) == [index.Changed("ns.coll", "1.0.0", True)]
+    assert index.Index(root).set(["ns.coll:1.0.0"], yanked=True) == [index.Change("ns.coll", "1.0.0", "changed")]
 
     path = root / "index" / "ns" / "coll.jsonl"
     assert [(line["vers"], line["yanked"]) for line in _lines(path)] == [("1.0.0", True), ("2.0.0", False)]
@@ -53,7 +53,7 @@ def test_set_every_version(root: Path) -> None:
 def test_set_unchanged_writes_nothing(root: Path) -> None:
     before = (root / "collections.json").read_bytes()
 
-    assert index.Index(root).set(["ns.coll:2.0.0"], yanked=False) == [index.Changed("ns.coll", "2.0.0", False)]
+    assert index.Index(root).set(["ns.coll:2.0.0"], yanked=False) == [index.Change("ns.coll", "2.0.0", "unchanged")]
     assert (root / "collections.json").read_bytes() == before
 
 
@@ -107,7 +107,7 @@ def test_remove_version(root: Path) -> None:
     artifact = _lines(root / "index" / "ns" / "coll.jsonl")[0]["sha256"]
     assert isinstance(artifact, str)
 
-    assert index.Index(root).remove(["ns.coll:1.0.0"]) == [index.Changed("ns.coll", "1.0.0", True)]
+    assert index.Index(root).remove(["ns.coll:1.0.0"]) == [index.Change("ns.coll", "1.0.0", "removed")]
 
     assert [line["vers"] for line in _lines(root / "index" / "ns" / "coll.jsonl")] == ["2.0.0"]
     assert not (root / "dl" / artifact[:2] / f"{artifact}.tar.gz").exists()
@@ -140,7 +140,7 @@ def test_remove_refused_for_dependents(root: Path) -> None:
 def test_remove_after_yanking_dependents(root: Path) -> None:
     index.Index(root).set(["ns.dep"], yanked=True)
 
-    assert index.Index(root).remove(["ns.coll:2.0.0"]) == [index.Changed("ns.coll", "2.0.0", True)]
+    assert index.Index(root).remove(["ns.coll:2.0.0"]) == [index.Change("ns.coll", "2.0.0", "removed")]
 
 
 def test_remove_with_dependents(root: Path) -> None:
@@ -180,4 +180,4 @@ def test_remove_ignores_what_was_already_unmet(root: Path) -> None:
     path = root / "index" / "ns" / "dep.jsonl"
     path.write_bytes(path.read_bytes().replace(b'">=2.0.0"', b'">=9.0.0"'))
 
-    assert index.Index(root).remove(["ns.coll:2.0.0"]) == [index.Changed("ns.coll", "2.0.0", True)]
+    assert index.Index(root).remove(["ns.coll:2.0.0"]) == [index.Change("ns.coll", "2.0.0", "removed")]

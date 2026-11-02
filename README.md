@@ -20,9 +20,9 @@ $ python -m http.server -d my-index
 | Command | |
 |---|---|
 | `config [--index TEMPLATE] [--dl-template TEMPLATE] [--[no-]listing] [--[no-]plugins]` | Write `config.json`. An option left out keeps what it says now, or takes the default, which is index files by name (`index/{namespace}/{name}.jsonl`), artifacts in the `--dl` directory as a path in the index (`dl/{sha256-prefix}/{sha256-checksum}.tar.gz`), a `collections.json` listing and a `plugins.jsonl` plugin index. It can't change once the index has collections. See [Artifacts](#artifacts) |
-| `add TARBALL... [--published TIME]` | Add collection artifacts. Each version is read from its own `MANIFEST.json` and `meta/runtime.yml`. A version already in the index with the same artifact is skipped, and one with another artifact is refused. Every dependency must be met by a version in the index, or among the tarballs, that isn't yanked |
-| `set NS.NAME[:VERSION]... [--[no-]yanked] [--[no-]deprecated]` | Change whether versions are yanked or deprecated, the only things about a version that can change. `NS.NAME` alone is every version of it. A yanked version stays installable when a lock file pins it, and is skipped otherwise |
-| `remove NS.NAME[:VERSION]...` | Take versions down, deleting their lines, artifacts and plugin extractions. Lock files pinning them stop working. It's refused if a version that stays, and isn't yanked, would be left without a version it needs. Yank those first, or remove them too |
+| `add TARBALL... [--published TIME] [--skip-checks CHECK]... [--no-commit]` | Add collection artifacts. Each version is read from its own `MANIFEST.json` and `meta/runtime.yml`. A version already in the index with the same artifact is skipped, and one with another artifact is refused. Every dependency must be met by a version in the index, or among the tarballs, that isn't yanked, and every requirement must be one ansible-core can read. `--skip-checks dependencies` and `--skip-checks requirements` make those warnings instead. Avoid them, as a client may then fail to use the collection. They're for mirroring another source one to one, such as Galaxy. The artifact, its `MANIFEST.json`, and its name and version are always checked |
+| `set NS.NAME[:VERSION]... [--[no-]yanked] [--[no-]deprecated] [--no-commit]` | Change whether versions are yanked or deprecated, the only things about a version that can change. `NS.NAME` alone is every version of it. A yanked version stays installable when a lock file pins it, and is skipped otherwise |
+| `remove NS.NAME[:VERSION]... [--no-commit]` | Take versions down, deleting their lines, artifacts and plugin extractions. Lock files pinning them stop working. It's refused if a version that stays, and isn't yanked, would be left without a version it needs. Yank those first, or remove them too |
 | `rebuild [NS.NAME[:VERSION]... \| --all] [--files index\|plugins]... [--from-artifacts] [--allow-changes]` | Make public files again, from what the index knows or from the artifacts. See [Rebuilding](#rebuilding) |
 | `generate-shell-completion SHELL` | Print the script that enables Tab completion. See [Shell completion](#shell-completion) |
 
@@ -35,6 +35,68 @@ Every command but `generate-shell-completion` takes:
   the files that need to be publicly published.
 - `--dl DIR`, the directory of the artifacts, `dl/` in the root by default,
   also relative to the current directory. See [Artifacts](#artifacts).
+
+If the collections don't fit on the command line for your platform, put them
+in a file, one a line, and pass `@FILE`, such as
+`alai-index rebuild @changed-collections.txt`. Each line is read as one
+argument, as it's written.
+
+## Running it from a program
+
+`add`, `set`, `remove` and `rebuild` take `--output-format json`, which
+prints one JSON object to stdout:
+
+```json
+{
+  "versions": [{"name": "ns.coll", "version": "1.0.0", "sha256": "…", "result": "added"}],
+  "collections": ["ns.coll"],
+  "written": {
+    "dl": [],
+    "index": ["dl/ab/ab40….tar.gz", "index/ns/coll.jsonl", "plugins.jsonl", "collections.json"],
+    "private": ["cache/plugins/ns/coll.jsonl", "index/ns/coll.jsonl", "collections.json"]
+  },
+  "deleted": {"dl": [], "index": [], "private": []},
+  "stale": []
+}
+```
+
+| Key | |
+|---|---|
+| `versions` | Each version the command acted on, as an object with its collection's `name`, its `version`, and `result`, what the command did with it, from the table below. `add` gives the artifact's `sha256` too, and `rebuild` an `error` when extracting failed |
+| `collections` | Each collection with a file written or deleted. A command that changed nothing gives none |
+| `written`, `deleted` | Each file written or deleted, in three groups, each relative to its own directory. `dl` is artifacts published on another host, relative to `--dl`. `index` is what's published with the index, relative to the root, in the order to publish it. `private` is the private state, relative to `--private` |
+| `stale` | Each index file found by sha256 that the listing no longer names. Delete it from the host once copies of the old `collections.json` have expired |
+
+Each command gives these values of `result`:
+
+| Command | `result` |
+|---|---|
+| `add` | `added`, or `exists` if it was already in the index |
+| `set` | `changed`, or `unchanged` if it already was as asked |
+| `remove` | `removed` |
+| `rebuild` | `extracted`, for each version whose plugins `--from-artifacts` extracted again. Otherwise it gives no versions |
+
+Publish `dl` first, then `index` in its order, and delete what `deleted`
+lists after. Warnings always go to stderr, so stdout is only the JSON. Errors
+go to stderr too, with exit code 1. The JSON only ever gains keys, and a key
+never changes meaning, so it has no version.
+
+### Batching changes
+
+Each `add`, `set` or `remove` rewrites `plugins.jsonl` and
+`collections.json`, which is most of the time a change takes in a large
+index. `--no-commit` leaves those two as they are, and a `rebuild` with the
+collections changed writes them once at the end:
+
+```console
+$ alai-index add --no-commit --output-format json a.tar.gz > a.json
+$ alai-index add --no-commit --output-format json b.tar.gz > b.json
+$ jq -r '.collections[]' a.json b.json | sort -u > changed.txt
+$ alai-index rebuild @changed.txt
+```
+
+Until then, the published `plugins.jsonl` and `collections.json` don't show
+the changes, but every other file is written, the private state included.
 
 ## Shell completion
 

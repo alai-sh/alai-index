@@ -29,6 +29,12 @@
   the tree as it was.
 - A failed plugin extraction never stops a version being added.
 - It must work on Windows, and CI tests it there.
+- stdout is only the command's output, text or JSON. Warnings and errors
+  go to stderr.
+- The JSON output only ever gains keys, and a key never changes meaning,
+  so it has no version field. If a key ever has to be removed or change
+  meaning, add a top-level `v` first, with a missing `v` read as 1, so
+  callers can tell the two apart.
 - What users read is US English, the CLI's help and output and
   `README.md`, without `;` or `:` in the text.
 - Comments are sparse, in short plain sentences, without `;` or `:`.
