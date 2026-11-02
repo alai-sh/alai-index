@@ -111,7 +111,9 @@ def test_remove_version(root: Path) -> None:
 
     assert [line["vers"] for line in _lines(root / "index" / "ns" / "coll.jsonl")] == ["2.0.0"]
     assert not (root / "dl" / artifact[:2] / f"{artifact}.tar.gz").exists()
-    assert [line["version"] for line in _lines(root / "private" / "plugins" / "ns" / "coll.jsonl")] == ["2.0.0"]
+    assert [line["version"] for line in _lines(root / "private" / "cache" / "plugins" / "ns" / "coll.jsonl")] == [
+        "2.0.0"
+    ]
     assert [(p["name"], p["since"]) for p in _lines(root / "plugins.jsonl")] == [("new", "2.0.0")]
 
 
@@ -120,7 +122,7 @@ def test_remove_collection(root: Path) -> None:
 
     assert set(_listing(root)["ns"]) == {"coll"}
     assert not (root / "index" / "ns" / "dep.jsonl").exists()
-    assert not (root / "private" / "plugins" / "ns" / "dep.jsonl").exists()
+    assert not (root / "private" / "cache" / "plugins" / "ns" / "dep.jsonl").exists()
     assert len(list((root / "dl").rglob("*.tar.gz"))) == 2
 
 

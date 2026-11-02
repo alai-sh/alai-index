@@ -79,3 +79,31 @@ def test_set_and_remove(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> N
     assert main(["remove", "--root", root, "ns.coll"]) == 0
 
     assert capsys.readouterr().out == ("updated ns.coll 1.0.0\nns.coll 1.0.0 is unchanged\nremoved ns.coll 1.0.0\n")
+
+
+def test_rebuild(tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch) -> None:
+    root = str(tmp_path / "index")
+    main(["config", "--root", root])
+    main(["add", "--root", root, str(build_collection(tmp_path / "a.tar.gz"))])
+    capsys.readouterr()
+
+    assert main(["rebuild", "--root", root]) == 0
+    assert capsys.readouterr().out == "nothing changed\n"
+
+    def fail(path: object) -> None:
+        raise ValueError("boom")
+
+    monkeypatch.setattr("alai_core.extract.extract", fail)
+    assert main(["rebuild", "--root", root, "--all", "--files", "plugins", "--from-artifacts"]) == 0
+    captured = capsys.readouterr()
+    assert captured.out == "rebuilt ns.coll 1.0.0's plugins\n"
+    assert captured.err.startswith("warning: extracting ns.coll 1.0.0's plugins failed")
+
+
+def test_private(tmp_path: Path) -> None:
+    root, state = str(tmp_path / "index"), str(tmp_path / "state")
+
+    assert main(["config", "--root", root, "--private", state]) == 0
+    assert main(["add", "--root", root, "--private", state, str(build_collection(tmp_path / "a.tar.gz"))]) == 0
+    assert (tmp_path / "state" / "collections.json").exists()
+    assert not (tmp_path / "index" / "private").exists()

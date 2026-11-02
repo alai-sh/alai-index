@@ -37,14 +37,22 @@ def main(argv: _c.Sequence[str] | None = None) -> int:
 def _config(args: argparse.Namespace) -> int:
     from . import _index as index
 
-    index.configure(args.root, index=args.index, dl=args.dl, listing=args.listing, plugins=args.plugins)
+    index.configure(
+        args.root,
+        private=args.private,
+        dl=args.dl,
+        index=args.index,
+        dl_template=args.dl_template,
+        listing=args.listing,
+        plugins=args.plugins,
+    )
     return 0
 
 
 def _add(args: argparse.Namespace) -> int:
     from . import _index as index
 
-    for added in index.Index(args.root).add(args.tarballs, published=args.published):
+    for added in index.Index(args.root, private=args.private, dl=args.dl).add(args.tarballs, published=args.published):
         if added.added:
             print(f"added {added.name} {added.version}")
         else:
@@ -55,7 +63,9 @@ def _add(args: argparse.Namespace) -> int:
 def _set(args: argparse.Namespace) -> int:
     from . import _index as index
 
-    for changed in index.Index(args.root).set(args.targets, yanked=args.yanked, deprecated=args.deprecated):
+    for changed in index.Index(args.root, private=args.private, dl=args.dl).set(
+        args.targets, yanked=args.yanked, deprecated=args.deprecated
+    ):
         if changed.changed:
             print(f"updated {changed.name} {changed.version}")
         else:
@@ -66,8 +76,30 @@ def _set(args: argparse.Namespace) -> int:
 def _remove(args: argparse.Namespace) -> int:
     from . import _index as index
 
-    for removed in index.Index(args.root).remove(args.targets):
+    for removed in index.Index(args.root, private=args.private, dl=args.dl).remove(args.targets):
         print(f"removed {removed.name} {removed.version}")
+    return 0
+
+
+def _rebuild(args: argparse.Namespace) -> int:
+    from . import _index as index
+
+    results = index.Index(args.root, private=args.private, dl=args.dl).rebuild(
+        args.targets,
+        everything=args.all,
+        files=args.files,
+        from_artifacts=args.from_artifacts,
+        allow_changes=args.allow_changes,
+    )
+    for rebuilt in results:
+        print(f"rebuilt {rebuilt.what}")
+        if rebuilt.error:
+            print(
+                f"warning: extracting {rebuilt.what} failed, so the plugin index has none of them. {rebuilt.error}",
+                file=sys.stderr,
+            )
+    if not results:
+        print("nothing changed")
     return 0
 
 
@@ -103,6 +135,17 @@ def _parser() -> argparse.ArgumentParser:
     # Options every command that works on an index takes.
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--root", default=".", metavar="DIR", help="the index's directory, the current one by default")
+    common.add_argument(
+        "--private",
+        metavar="DIR",
+        help="the directory of the index's own state, which is never published but must be kept, ROOT/private by "
+        + "default",
+    )
+    common.add_argument(
+        "--dl",
+        metavar="DIR",
+        help="the directory of the artifacts, ROOT/dl by default. For a dl template on another host, the host's root",
+    )
 
     config = commands.add_parser(
         "config",
@@ -119,9 +162,10 @@ def _parser() -> argparse.ArgumentParser:
         help="where each collection's index file is, index/{namespace}/{name}.jsonl by default",
     )
     config.add_argument(
-        "--dl",
+        "--dl-template",
         metavar="TEMPLATE",
-        help="where each artifact is, a URL or a path in the index, dl/{sha256-prefix}/{sha256-checksum}.tar.gz by default",
+        help="the URL clients download each artifact from, with {sha256-checksum} in it, by default the artifacts' "
+        + "directory as a path in the index, dl/{sha256-prefix}/{sha256-checksum}.tar.gz",
     )
     config.add_argument(
         "--listing",
@@ -172,6 +216,41 @@ def _parser() -> argparse.ArgumentParser:
     )
     remove.add_argument("targets", nargs="+", metavar="NS.NAME[:VERSION]", help=target_help)
     remove.set_defaults(func=_remove)
+
+    rebuild = commands.add_parser(
+        "rebuild",
+        parents=[common],
+        help="make the public files again",
+        description="Make public files again, from what the index knows, or with --from-artifacts, from the "
+        + "artifacts. Without collections or --all, only collections.json and plugins.jsonl are made again.",
+    )
+    rebuild.add_argument(
+        "targets",
+        nargs="*",
+        metavar="NS.NAME[:VERSION]",
+        help="a collection, for every version of it, or one version as NS.NAME:VERSION",
+    )
+    rebuild.add_argument("--all", action="store_true", help="every collection, in place of naming them")
+    rebuild.add_argument(
+        "--files",
+        action="append",
+        choices=("index", "plugins"),
+        help="what to make again, index files and collections.json, or plugins.jsonl, both by default. Give it "
+        + "twice for both",
+    )
+    rebuild.add_argument(
+        "--from-artifacts",
+        action="store_true",
+        help="read each version's deps, requires_ansible and size, and extract its plugins, from its artifact, "
+        + "rather than from what the index knows",
+    )
+    rebuild.add_argument(
+        "--allow-changes",
+        action="store_true",
+        help="with --from-artifacts, write deps, requires_ansible or size that differ from the index file's, which "
+        + "are meant to stay as they were published",
+    )
+    rebuild.set_defaults(func=_rebuild)
 
     completion = commands.add_parser(
         "generate-shell-completion",

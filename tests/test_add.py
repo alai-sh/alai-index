@@ -73,7 +73,7 @@ def test_add(tmp_path: Path, root: Path) -> None:
             "short_description": "Manage things",
         }
     ]
-    assert _lines(root / "private" / "plugins" / "ns" / "coll.jsonl") == [
+    assert _lines(root / "private" / "cache" / "plugins" / "ns" / "coll.jsonl") == [
         {
             "v": 1,
             "version": "1.0.0",
@@ -124,8 +124,7 @@ def test_missing_dependency(tmp_path: Path, root: Path) -> None:
 
 def test_yanked_dependency_doesnt_count(tmp_path: Path, root: Path) -> None:
     index.Index(root).add([build_collection(tmp_path / "dep.tar.gz", "ns.dep", "1.0.0")])
-    dep_file = root / "index" / "ns" / "dep.jsonl"
-    dep_file.write_bytes(dep_file.read_bytes().replace(b'"yanked":false', b'"yanked":true'))
+    index.Index(root).set(["ns.dep"], yanked=True)
 
     with pytest.raises(index.Error, match="no version in the index that isn't yanked"):
         index.Index(root).add([build_collection(tmp_path / "a.tar.gz", dependencies={"ns.dep": "*"})])
@@ -168,7 +167,7 @@ def test_failed_extraction_still_adds(tmp_path: Path, root: Path, monkeypatch: p
     tarball = build_collection(tmp_path / "a.tar.gz", modules={"a": module("A")})
 
     assert index.Index(root).add([tarball])[0].added
-    assert _lines(root / "private" / "plugins" / "ns" / "coll.jsonl") == [
+    assert _lines(root / "private" / "cache" / "plugins" / "ns" / "coll.jsonl") == [
         {"v": 1, "version": "1.0.0", "revision": 1, "error": "ValueError: boom"}
     ]
     assert (root / "plugins.jsonl").read_bytes() == b""
@@ -176,7 +175,7 @@ def test_failed_extraction_still_adds(tmp_path: Path, root: Path, monkeypatch: p
 
 def test_private_lines_follow_the_index(tmp_path: Path, root: Path) -> None:
     index.Index(root).add([build_collection(tmp_path / "a.tar.gz")])
-    private = root / "private" / "plugins" / "ns" / "coll.jsonl"
+    private = root / "private" / "cache" / "plugins" / "ns" / "coll.jsonl"
     # As a run that stopped after writing the private file, but before the index file, leaves it.
     private.write_bytes(private.read_bytes() + b'{"v":1,"version":"9.0.0","revision":1,"plugins":[],"routing":{}}\n')
     index.Index(root).add([build_collection(tmp_path / "b.tar.gz", version="2.0.0")])
@@ -186,7 +185,7 @@ def test_private_lines_follow_the_index(tmp_path: Path, root: Path) -> None:
 
 def test_private_file_missing(tmp_path: Path, root: Path) -> None:
     index.Index(root).add([build_collection(tmp_path / "a.tar.gz")])
-    (root / "private" / "plugins" / "ns" / "coll.jsonl").unlink()
+    (root / "private" / "cache" / "plugins" / "ns" / "coll.jsonl").unlink()
     before = (root / "index" / "ns" / "coll.jsonl").read_bytes()
 
     with pytest.raises(index.Error, match=r"which ns\.coll's plugin lines need"):
@@ -197,7 +196,7 @@ def test_private_file_missing(tmp_path: Path, root: Path) -> None:
 
 def test_private_file_missing_a_version(tmp_path: Path, root: Path) -> None:
     index.Index(root).add([build_collection(tmp_path / "a.tar.gz")])
-    (root / "private" / "plugins" / "ns" / "coll.jsonl").write_bytes(b"")
+    (root / "private" / "cache" / "plugins" / "ns" / "coll.jsonl").write_bytes(b"")
 
     with pytest.raises(index.Error, match=r"has no extraction for ns\.coll 1\.0\.0"):
         index.Index(root).add([build_collection(tmp_path / "b.tar.gz", version="2.0.0")])
@@ -205,7 +204,7 @@ def test_private_file_missing_a_version(tmp_path: Path, root: Path) -> None:
 
 def test_private_file_newer(tmp_path: Path, root: Path) -> None:
     index.Index(root).add([build_collection(tmp_path / "a.tar.gz")])
-    (root / "private" / "plugins" / "ns" / "coll.jsonl").write_bytes(b'{"v":2,"version":"1.0.0"}\n')
+    (root / "private" / "cache" / "plugins" / "ns" / "coll.jsonl").write_bytes(b'{"v":2,"version":"1.0.0"}\n')
 
     with pytest.raises(index.Error, match="line 1 isn't a version's extraction this alai-index reads"):
         index.Index(root).add([build_collection(tmp_path / "b.tar.gz", version="2.0.0")])
@@ -235,41 +234,39 @@ def test_no_listing_or_plugins(tmp_path: Path) -> None:
     assert [line["vers"] for line in _lines(root / "index" / "ns" / "coll.jsonl")] == ["1.0.0", "2.0.0"]
     assert not (root / "collections.json").exists()
     assert not (root / "plugins.jsonl").exists()
-    assert not (root / "private").exists()
+    assert not (root / "private" / "cache" / "plugins").exists()
 
 
-def test_dl_on_another_host(tmp_path: Path) -> None:
+@pytest.mark.parametrize("dl", [None, "artifacts"])
+def test_dl_on_another_host(tmp_path: Path, dl: str | None) -> None:
     root = tmp_path / "index"
-    index.configure(root, dl="https://dl.example/c/{namespace}/{name}/{version}.tar.gz")
-    tarball = build_collection(tmp_path / "a.tar.gz", version="1.0.0+build")
+    dl_dir = tmp_path / dl if dl else None
+    template = "https://dl.example/sha256/{sha256-prefix}/{sha256-checksum}.tar.gz"
+    index.configure(root, dl=dl_dir, dl_template=template)
+    tarball = build_collection(tmp_path / "a.tar.gz")
+    sha256 = _sha256(tarball)
+    index.Index(root, dl=dl_dir).add([tarball])
+
+    # At the URL's path, below the directory standing for the host's root.
+    host = dl_dir or root / "dl"
+    assert (host / "sha256" / sha256[:2] / f"{sha256}.tar.gz").read_bytes() == tarball.read_bytes()
+
+
+def test_dl_in_the_index(tmp_path: Path) -> None:
+    root = tmp_path / "index"
+    index.configure(root, dl=root / "artifacts")
+    tarball = build_collection(tmp_path / "a.tar.gz")
+    sha256 = _sha256(tarball)
     index.Index(root).add([tarball])
 
-    # The URL's %2B is the + a web server serving the tree finds the file by.
-    assert (root / "dl" / "c" / "ns" / "coll" / "1.0.0+build.tar.gz").read_bytes() == tarball.read_bytes()
-
-
-@pytest.mark.parametrize(
-    "dl",
-    [
-        "../{sha256-checksum}.tar.gz",
-        "/abs/{sha256-checksum}.tar.gz",
-        "dl/c:{sha256-checksum}.tar.gz",
-        "dl\\..\\..\\{sha256-checksum}.tar.gz",
-    ],
-)
-def test_dl_outside_the_tree(tmp_path: Path, dl: str) -> None:
-    root = tmp_path / "index"
-    index.configure(root, dl=dl)
-
-    with pytest.raises(index.Error, match="leads outside the index"):
-        index.Index(root).add([build_collection(tmp_path / "a.tar.gz")])
+    assert (root / "artifacts" / sha256[:2] / f"{sha256}.tar.gz").read_bytes() == tarball.read_bytes()
 
 
 def test_listed_index_file_missing(tmp_path: Path, root: Path) -> None:
     index.Index(root).add([build_collection(tmp_path / "a.tar.gz")])
     (root / "index" / "ns" / "coll.jsonl").unlink()
 
-    with pytest.raises(index.Error, match=r"which collections\.json lists for ns\.coll"):
+    with pytest.raises(index.Error, match=r"ns\.coll's index file doesn't match its state"):
         index.Index(root).add([build_collection(tmp_path / "b.tar.gz", version="2.0.0")])
 
 
@@ -278,7 +275,7 @@ def test_unreadable_index_line_isnt_dropped(tmp_path: Path, root: Path) -> None:
     path = root / "index" / "ns" / "coll.jsonl"
     path.write_bytes(path.read_bytes() + b'{"v":2,"name":"ns.coll"}\nnot json\n')
 
-    with pytest.raises(index.Error, match="rewriting it would lose: line 3"):
+    with pytest.raises(index.Error, match="has lines this alai-index can't read, line 3"):
         index.Index(root).add([build_collection(tmp_path / "b.tar.gz", version="2.0.0")])
 
 

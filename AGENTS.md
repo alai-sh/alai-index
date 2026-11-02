@@ -9,9 +9,17 @@
   operation reads into the tree, and publishes what it writes. A file the
   tree should have and doesn't is an error, never taken as empty, which
   would publish an index missing versions.
-- Everything under `private/` in the tree is alai-index's own state. It
-  isn't part of the index format or the public interface, clients never
-  read it, and its files can change shape without a format version bump.
+- The private directory (`private/` in the tree unless `--private` says
+  otherwise) holds the index's state, which with `config.json` and the
+  artifacts is the source of truth. Only what can't be derived goes in the
+  state. Every public file, and the private `cache/`, is derived and can
+  always be rebuilt. The cache exists because rebuilding it means
+  unpacking every artifact. The private directory isn't part of the index
+  format or the public interface, clients never read it, and its files can
+  change shape without a format version bump.
+- Private files are written before public ones, and a public index file
+  that doesn't match the private state is an error, never silently
+  trusted or rewritten.
 - An index line comes from the artifact itself, `MANIFEST.json` and
   `meta/runtime.yml`, never from an upstream's API.
 - Write order: artifacts and private files, then index files, then
