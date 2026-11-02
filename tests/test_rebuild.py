@@ -42,6 +42,13 @@ def root(tmp_path: Path) -> Path:
     return root
 
 
+def _rebuilt(root: Path, *args: object, **kwargs: object) -> list[str]:
+    """The public files a rebuild wrote."""
+    tree = index.Index(root)
+    tree.rebuild(*args, **kwargs)  # pyright: ignore[reportArgumentType]
+    return tree.files["written"]["index"]
+
+
 def _extractions(root: Path, name: str = "coll") -> Path:
     return root / "private" / "cache" / "plugins" / "ns" / f"{name}.jsonl"
 
@@ -58,7 +65,7 @@ def test_without_targets_only_the_listing_and_plugin_index(root: Path) -> None:
     coll = root / "index" / "ns" / "coll.jsonl"
     coll.write_bytes(coll.read_bytes().replace(b'"yanked":true', b'"yanked":false'))
 
-    assert sorted(r.what for r in index.Index(root).rebuild()) == ["collections.json", "plugins.jsonl"]
+    assert sorted(_rebuilt(root)) == ["collections.json", "plugins.jsonl"]
     assert b'"yanked":false' in coll.read_bytes()
     assert {p: b for p, b in _public(root).items() if p != coll} == {p: b for p, b in before.items() if p != coll}
 
@@ -69,7 +76,7 @@ def test_all_from_what_the_index_knows(root: Path) -> None:
     coll.write_bytes(coll.read_bytes().replace(b'"yanked":true', b'"yanked":false'))
     (root / "plugins.jsonl").write_bytes(b"")
 
-    assert sorted(r.what for r in index.Index(root).rebuild(everything=True)) == [
+    assert sorted(_rebuilt(root, everything=True)) == [
         "index/ns/coll.jsonl",
         "plugins.jsonl",
     ]
@@ -80,9 +87,9 @@ def test_files_narrows_it(root: Path) -> None:
     (root / "collections.json").write_bytes(b"{}")
     (root / "plugins.jsonl").write_bytes(b"")
 
-    assert [r.what for r in index.Index(root).rebuild(files=["plugins"])] == ["plugins.jsonl"]
+    assert _rebuilt(root, files=["plugins"]) == ["plugins.jsonl"]
     assert (root / "collections.json").read_bytes() == b"{}"
-    assert [r.what for r in index.Index(root).rebuild(files=["index"])] == ["collections.json"]
+    assert _rebuilt(root, files=["index"]) == ["collections.json"]
 
 
 def test_restore_from_config_state_and_artifacts(root: Path) -> None:
@@ -119,8 +126,8 @@ def test_from_artifacts_refuses_changes(root: Path) -> None:
         index.Index(root).rebuild(everything=True, files=["index"], from_artifacts=True)
     assert path.read_bytes() == before
 
-    written = index.Index(root).rebuild(["ns.other"], files=["index"], from_artifacts=True, allow_changes=True)
-    assert [r.what for r in written] == ["index/ns/other.jsonl", "collections.json"]
+    written = _rebuilt(root, ["ns.other"], files=["index"], from_artifacts=True, allow_changes=True)
+    assert written == ["index/ns/other.jsonl", "collections.json"]
     assert _lines(path)[0]["deps"] == [{"name": "ns.coll", "req": ">=1.0"}]
 
 
@@ -133,8 +140,8 @@ def test_lost_extractions(tmp_path: Path, root: Path) -> None:
     with pytest.raises(index.Error, match=r"'alai-index rebuild ns\.coll --files plugins --from-artifacts' makes it"):
         index.Index(root).rebuild()
     assert index.Index(root).rebuild(["ns.coll"], files=["plugins"], from_artifacts=True) == [
-        index.Rebuilt("ns.coll 1.0.0's plugins"),
-        index.Rebuilt("ns.coll 2.0.0's plugins"),
+        index.Change("ns.coll", "1.0.0", "extracted"),
+        index.Change("ns.coll", "2.0.0", "extracted"),
     ]
     assert _extractions(root).read_bytes() == before
     assert (root / "plugins.jsonl").read_bytes() == plugin_index
@@ -149,9 +156,13 @@ def test_extraction_still_fails(root: Path, monkeypatch: pytest.MonkeyPatch) -> 
 
     monkeypatch.setattr("alai_core.extract.extract", fail)
 
-    assert index.Index(root).rebuild(["ns.other"], files=["plugins"], from_artifacts=True) == [
-        index.Rebuilt("ns.other 1.0.0's plugins", "ValueError: boom"),
-        index.Rebuilt("plugins.jsonl"),
+    tree = index.Index(root)
+    assert tree.rebuild(["ns.other"], files=["plugins"], from_artifacts=True) == [
+        index.Change("ns.other", "1.0.0", "extracted", error="ValueError: boom")
+    ]
+    assert tree.files["written"]["index"] == ["plugins.jsonl"]
+    assert tree.warnings == [
+        "ns.other 1.0.0: extracting its plugins failed, so the plugin index has none of them. ValueError: boom"
     ]
     assert [p["name"] for p in _lines(root / "plugins.jsonl")] == ["new", "old"]
 

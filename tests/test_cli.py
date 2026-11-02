@@ -96,8 +96,8 @@ def test_rebuild(tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch
     monkeypatch.setattr("alai_core.extract.extract", fail)
     assert main(["rebuild", "--root", root, "--all", "--files", "plugins", "--from-artifacts"]) == 0
     captured = capsys.readouterr()
-    assert captured.out == "rebuilt ns.coll 1.0.0's plugins\n"
-    assert captured.err.startswith("warning: extracting ns.coll 1.0.0's plugins failed")
+    assert captured.out == "re-extracted ns.coll 1.0.0\n"
+    assert captured.err.startswith("warning: ns.coll 1.0.0: extracting its plugins failed")
 
 
 def test_private(tmp_path: Path) -> None:
@@ -107,3 +107,35 @@ def test_private(tmp_path: Path) -> None:
     assert main(["add", "--root", root, "--private", state, str(build_collection(tmp_path / "a.tar.gz"))]) == 0
     assert (tmp_path / "state" / "collections.json").exists()
     assert not (tmp_path / "index" / "private").exists()
+
+
+@pytest.mark.parametrize(
+    ("env", "colored"),
+    [({}, False), ({"FORCE_COLOR": "1"}, True), ({"FORCE_COLOR": "1", "NO_COLOR": "1"}, False)],
+)
+def test_error_color(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    env: dict[str, str],
+    colored: bool,
+) -> None:
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+
+    assert main(["add", "--root", str(tmp_path), "a.tar.gz"]) == 1
+    err = capsys.readouterr().err
+    assert err.startswith("\x1b[1;31merror\x1b[0m\x1b[1m:\x1b[0m " if colored else "error: ")
+
+
+def test_warning_color(tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch) -> None:
+    root = str(tmp_path / "index")
+    main(["config", "--root", root])
+    tarball = str(build_collection(tmp_path / "a.tar.gz", dependencies={"ns.missing": "*"}))
+    monkeypatch.setenv("FORCE_COLOR", "1")
+    capsys.readouterr()
+
+    assert main(["add", "--root", root, "--skip-checks", "dependencies", tarball]) == 0
+    captured = capsys.readouterr()
+    assert captured.err.startswith("\x1b[1;33mwarning\x1b[0m\x1b[1m:\x1b[0m \x1b[1mns.coll 1.0.0 needs")
+    assert captured.out == "added ns.coll 1.0.0\n"  # Only stderr is coloured.

@@ -8,8 +8,13 @@ from __future__ import annotations
 
 import argparse
 import collections.abc as _c
+import json
 import os
 import sys
+import typing as _t
+
+if _t.TYPE_CHECKING:
+    from ._index import Change, Index
 
 EXIT_ERROR = 1
 """An error was reported. argparse exits 2 for a wrong command line."""
@@ -30,7 +35,7 @@ def main(argv: _c.Sequence[str] | None = None) -> int:
     try:
         return args.func(args)
     except index.Error as e:
-        print(f"error: {e}", file=sys.stderr)
+        _report("error", RED, str(e))
         return EXIT_ERROR
 
 
@@ -49,58 +54,87 @@ def _config(args: argparse.Namespace) -> int:
     return 0
 
 
-def _add(args: argparse.Namespace) -> int:
+def _open(args: argparse.Namespace) -> Index:
     from . import _index as index
 
-    for added in index.Index(args.root, private=args.private, dl=args.dl).add(args.tarballs, published=args.published):
-        if added.added:
-            print(f"added {added.name} {added.version}")
-        else:
-            print(f"{added.name} {added.version} is already in the index")
+    return index.Index(args.root, private=args.private, dl=args.dl)
+
+
+TEXT = {
+    "added": "added {name} {version}",
+    "exists": "{name} {version} is already in the index",
+    "changed": "updated {name} {version}",
+    "unchanged": "{name} {version} is unchanged",
+    "removed": "removed {name} {version}",
+    "extracted": "re-extracted {name} {version}",
+}
+"""Each ``Change.result``, as the text output says it."""
+
+BOLD, RED, YELLOW = "1", "31", "33"
+
+
+def _color() -> bool:
+    """Whether to colour stderr, as alai does. Not with ``NO_COLOR``, always with ``FORCE_COLOR``, and otherwise on a
+    terminal that isn't ``TERM=dumb``."""
+    if os.environ.get("NO_COLOR"):
+        return False
+    if os.environ.get("FORCE_COLOR"):
+        return True
+    return sys.stderr.isatty() and os.environ.get("TERM") != "dumb"
+
+
+def _styled(text: str, *codes: str) -> str:
+    return f"\x1b[{';'.join(codes)}m{text}\x1b[0m" if _color() else text
+
+
+def _report(kind: str, color: str, message: str) -> None:
+    print(f"{_styled(kind, BOLD, color)}{_styled(':', BOLD)} {_styled(message, BOLD)}", file=sys.stderr)
+
+
+def _finish(args: argparse.Namespace, tree: Index, results: list[Change], more: _c.Sequence[str] = ()) -> int:
+    """Print the warnings to stderr, and what changed to stdout, as text, with ``more`` lines after, or as JSON.
+
+    The JSON only ever gains keys, and a key never changes meaning, so it has no version.
+    """
+    for warning in tree.warnings:
+        _report("warning", YELLOW, warning)
+    if args.output_format == "json":
+        versions = [{k: v for k, v in c._asdict().items() if v is not None} for c in results]
+        print(json.dumps({"versions": versions, **tree.files}))
+    else:
+        for line in [TEXT[c.result].format(name=c.name, version=c.version) for c in results] + list(more):
+            print(line)
     return 0
+
+
+def _add(args: argparse.Namespace) -> int:
+    tree = _open(args)
+    skip = args.skip_checks or ()
+    return _finish(args, tree, tree.add(args.tarballs, published=args.published, skip=skip, commit=not args.no_commit))
 
 
 def _set(args: argparse.Namespace) -> int:
-    from . import _index as index
-
-    for changed in index.Index(args.root, private=args.private, dl=args.dl).set(
-        args.targets, yanked=args.yanked, deprecated=args.deprecated
-    ):
-        if changed.changed:
-            print(f"updated {changed.name} {changed.version}")
-        else:
-            print(f"{changed.name} {changed.version} is unchanged")
-    return 0
+    tree = _open(args)
+    results = tree.set(args.targets, yanked=args.yanked, deprecated=args.deprecated, commit=not args.no_commit)
+    return _finish(args, tree, results)
 
 
 def _remove(args: argparse.Namespace) -> int:
-    from . import _index as index
-
-    for removed in index.Index(args.root, private=args.private, dl=args.dl).remove(args.targets):
-        print(f"removed {removed.name} {removed.version}")
-    return 0
+    tree = _open(args)
+    return _finish(args, tree, tree.remove(args.targets, commit=not args.no_commit))
 
 
 def _rebuild(args: argparse.Namespace) -> int:
-    from . import _index as index
-
-    results = index.Index(args.root, private=args.private, dl=args.dl).rebuild(
+    tree = _open(args)
+    results = tree.rebuild(
         args.targets,
         everything=args.all,
         files=args.files,
         from_artifacts=args.from_artifacts,
         allow_changes=args.allow_changes,
     )
-    for rebuilt in results:
-        print(f"rebuilt {rebuilt.what}")
-        if rebuilt.error:
-            print(
-                f"warning: extracting {rebuilt.what} failed, so the plugin index has none of them. {rebuilt.error}",
-                file=sys.stderr,
-            )
-    if not results:
-        print("nothing changed")
-    return 0
+    written = [f"rebuilt {path}" for path in tree.files["written"]["index"]]
+    return _finish(args, tree, results, written if results or written else ["nothing changed"])
 
 
 def _generate_shell_completion(args: argparse.Namespace) -> int:
@@ -128,8 +162,18 @@ def _complete(parser: argparse.ArgumentParser) -> None:
     autocomplete(parser, exit_method=sys.exit)
 
 
+SKIPPABLE_CHECKS = ("dependencies", "requirements")
+"""``_index.SKIPPABLE_CHECKS``, which is imported only to run a command."""
+
+
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="alai-index", description="Build and operate an alai index on disk.")
+    # @FILE reads arguments from FILE, a line each, for more than a command line holds, as Windows' 32,767 characters.
+    parser = argparse.ArgumentParser(
+        prog="alai-index",
+        description="Build and operate an alai index on disk. An argument @FILE is read as arguments from FILE, one "
+        + "a line.",
+        fromfile_prefix_chars="@",
+    )
     commands = parser.add_subparsers(title="commands", metavar="COMMAND", required=True)
 
     # Options every command that works on an index takes.
@@ -145,6 +189,23 @@ def _parser() -> argparse.ArgumentParser:
         "--dl",
         metavar="DIR",
         help="the directory of the artifacts, ROOT/dl by default. For a dl template on another host, the host's root",
+    )
+
+    # Options every command that changes collections takes.
+    changes = argparse.ArgumentParser(add_help=False, parents=[common])
+    changes.add_argument(
+        "--output-format",
+        choices=("text", "json"),
+        default="text",
+        help="how to print what changed, text by default. json gives the versions changed and every file written, "
+        + "deleted or left stale, for a program publishing the index. Warnings go to stderr either way",
+    )
+    no_commit = argparse.ArgumentParser(add_help=False)
+    no_commit.add_argument(
+        "--no-commit",
+        action="store_true",
+        help="leave plugins.jsonl and collections.json as they are, for 'alai-index rebuild' with the collections "
+        + "changed to write once after a batch of changes",
     )
 
     config = commands.add_parser(
@@ -181,7 +242,7 @@ def _parser() -> argparse.ArgumentParser:
 
     add = commands.add_parser(
         "add",
-        parents=[common],
+        parents=[changes, no_commit],
         help="add collection artifacts",
         description="Add collection artifacts. Each version is read from its MANIFEST.json and meta/runtime.yml.",
     )
@@ -189,12 +250,22 @@ def _parser() -> argparse.ArgumentParser:
     add.add_argument(
         "--published", metavar="TIME", help="when they were first published, RFC 3339 in UTC, now by default"
     )
+    add.add_argument(
+        "--skip-checks",
+        action="append",
+        choices=SKIPPABLE_CHECKS,
+        metavar="CHECK",
+        help="warn rather than refuse when a version fails this check. Avoid it, as a client may then fail to use the "
+        + "collection. It's for mirroring another source one to one. dependencies is a dependency no version in the "
+        + "index meets, and requirements one ansible-core can't read. Give it again for both. The artifact, its "
+        + "MANIFEST.json and its name and version are always checked",
+    )
     add.set_defaults(func=_add)
 
     target_help = "a collection, for every version of it, or one version as NS.NAME:VERSION"
     set_ = commands.add_parser(
         "set",
-        parents=[common],
+        parents=[changes, no_commit],
         help="yank or deprecate versions",
         description="Change whether versions are yanked or deprecated, the only things about a version that can change.",
     )
@@ -209,7 +280,7 @@ def _parser() -> argparse.ArgumentParser:
 
     remove = commands.add_parser(
         "remove",
-        parents=[common],
+        parents=[changes, no_commit],
         help="take versions down",
         description="Take versions down, deleting their lines and artifacts. It's refused if a version that stays, and "
         + "isn't yanked, would be left without a version it needs. Yank those first, or remove them too.",
@@ -219,7 +290,7 @@ def _parser() -> argparse.ArgumentParser:
 
     rebuild = commands.add_parser(
         "rebuild",
-        parents=[common],
+        parents=[changes],
         help="make the public files again",
         description="Make public files again, from what the index knows, or with --from-artifacts, from the "
         + "artifacts. Without collections or --all, only collections.json and plugins.jsonl are made again.",

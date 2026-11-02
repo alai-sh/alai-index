@@ -36,32 +36,29 @@ class Error(Exception):
     """A failure to report to the user, without a traceback."""
 
 
-class Added(_t.NamedTuple):
-    """A version ``Index.add`` was given."""
+class Change(_t.NamedTuple):
+    """A version a command was given, and what happened to it."""
 
     name: str
     version: str
-    sha256: str
-    added: bool
-    """False if the index already had it, with the same artifact."""
-
-
-class Changed(_t.NamedTuple):
-    """A version ``Index.set`` or ``Index.remove`` was asked to change."""
-
-    name: str
-    version: str
-    changed: bool
-    """False if it already was as asked."""
-
-
-class Rebuilt(_t.NamedTuple):
-    """Something ``Index.rebuild`` made again."""
-
-    what: str
-    """A version's plugins, such as ``ns.coll 1.0.0's plugins``, or a public file's path in the tree."""
+    result: str
+    """``added`` or ``exists`` from ``add``, ``changed`` or ``unchanged`` from ``set``, ``removed`` from ``remove``, and
+    ``extracted`` from ``rebuild``."""
+    sha256: str | None = None
+    """The artifact's, from ``add``."""
     error: str | None = None
-    """Why extracting a version's plugins failed, or None."""
+    """Why extracting its plugins failed, from ``rebuild``."""
+
+
+SKIPPABLE_CHECKS = ("dependencies", "requirements")
+"""The checks ``Index.add`` can skip, to copy versions as their origin published them. ``dependencies`` is a dependency
+no version in the index meets, and ``requirements`` one ``deps`` or ``requires_ansible`` ansible-core can't read."""
+
+
+def _files() -> dict[str, _t.Any]:
+    """What a command changed, by where each file is, as ``--output-format json`` gives it."""
+    groups = ("dl", "index", "private")
+    return {"collections": [], "written": {g: [] for g in groups}, "deleted": {g: [] for g in groups}, "stale": []}
 
 
 def now() -> str:
@@ -212,6 +209,26 @@ def _target(text: str) -> tuple[str, str | None]:
     return name, version if sep else None
 
 
+def _raw_deps(info: collection.Metadata, where: str) -> list[tuple[str, str]]:
+    """``MANIFEST.json``'s dependencies as written, even ones ansible-galaxy can't read."""
+    raw: object = info.get("dependencies") or {}
+    deps = _t.cast("dict[str, object]", raw) if isinstance(raw, dict) else None
+    if deps is None or not all(isinstance(r, str) for r in deps.values()):
+        raise Error(f"{where} has dependencies that aren't a mapping of names to requirements")
+    return [(n, _t.cast(str, r)) for n, r in deps.items()]
+
+
+def _readable_deps(line: CollectionVersion) -> list[tuple[str, VersionReq]]:
+    """A line's dependencies, leaving out any whose requirement can't be read."""
+    if line.problem is None:
+        return list(line.deps)
+    readable: list[tuple[str, VersionReq]] = []
+    for dep in _t.cast("list[dict[str, str]]", _fields(line)["deps"]):
+        with contextlib.suppress(ValueError):
+            readable.append((dep["name"], VersionReq.from_galaxy(dep["req"])))
+    return readable
+
+
 def _met(req: VersionReq, lines: _c.Iterable[CollectionVersion]) -> bool:
     """Whether a version that isn't yanked meets the requirement."""
     return any(not line.yanked and req.contains(line.version) for line in lines)
@@ -277,6 +294,13 @@ class Index:
         self.root = os.fspath(root)
         self.private = _private_dir(self.root, private)
         self.dl = dl
+        self.files = _files()
+        """Every file the commands run on this index wrote, deleted or left stale, by group: ``dl``, artifacts on
+        another host, relative to the artifacts' directory, ``index``, what's published with the index, relative to the
+        root, in the order to publish it, and ``private``, relative to the private directory. ``stale`` is each index
+        file found by sha256 that no listing names any more, to delete once copies of the old listing have expired."""
+        self.warnings: list[str] = []
+        """Each warning the commands run on this index gave."""
         path = os.path.join(self.root, "config.json")
         data = _read(path)
         if data is None:
@@ -320,16 +344,28 @@ class Index:
         namespace, short = name.split(".", 1)
         return os.path.join(self.private, "cache", "plugins", namespace, f"{short}.jsonl")
 
-    def add(self, tarballs: _c.Sequence[str | os.PathLike[str]], /, *, published: str | None = None) -> list[Added]:
+    def add(
+        self,
+        tarballs: _c.Sequence[str | os.PathLike[str]],
+        /,
+        *,
+        published: str | None = None,
+        skip: _c.Collection[str] = (),
+        commit: bool = True,
+    ) -> list[Change]:
         """Add collection artifacts, each version's line taken from its own ``MANIFEST.json`` and ``meta/runtime.yml``.
 
         Every tarball is checked before anything is written. A version the index has with the same artifact is
         skipped, and one it has with another is refused. Each dependency must be met by a version that isn't yanked,
-        in the index or among ``tarballs``.
+        in the index or among ``tarballs``, and requirements must be ones ansible-core can read, unless ``skip`` says
+        otherwise, when each is a warning instead.
 
         Args:
             tarballs: The artifacts.
             published: When they were first published, RFC 3339 in UTC, or None for now.
+            skip: The checks in ``SKIPPABLE_CHECKS`` to warn about rather than refuse.
+            commit: Write ``plugins.jsonl`` and ``collections.json`` too. Without, ``rebuild`` with the collections
+                changed does it later, so a batch of changes writes them once.
 
         Returns:
             Each tarball's version, in the order given.
@@ -340,11 +376,13 @@ class Index:
         published = published or now()
         listing = self._listing()
         with tempfile.TemporaryDirectory(prefix="alai-index-", ignore_cleanup_errors=True) as tmp:
-            staged = [self._stage(os.fspath(t), os.path.join(tmp, str(i)), published) for i, t in enumerate(tarballs)]
+            staged = [
+                self._stage(os.fspath(t), os.path.join(tmp, str(i)), published, skip) for i, t in enumerate(tarballs)
+            ]
 
         lines: dict[str, list[CollectionVersion]] = {}
         before: dict[str, list[CollectionVersion]] = {}
-        results: list[Added] = []
+        results: list[Change] = []
         new: list[_Staged] = []
         for s in staged:
             name, vers = s.line.name, s.line.version.text
@@ -355,26 +393,36 @@ class Index:
             existing = next((line for line in have if line.version == s.line.version), None)
             if existing is not None and existing.sha256 != s.line.sha256:
                 raise Error(f"{name} {vers} is already in the index with another artifact, sha256 {existing.sha256}")
-            results.append(Added(name, vers, s.line.sha256, existing is None))
+            results.append(Change(name, vers, "added" if existing is None else "exists", sha256=s.line.sha256))
             if existing is None:
                 have.append(s.line)
                 new.append(s)
 
         others: dict[str, list[CollectionVersion]] = {}
+        unmet: list[str] = []
         for s in new:
-            for dep, req in s.line.deps:
+            for dep, req in _readable_deps(s.line):
                 if dep not in lines and dep not in others:
                     others[dep] = self._lines(dep, listing)
                 if not _met(req, lines[dep] if dep in lines else others[dep]):
-                    raise Error(
+                    unmet.append(
                         f"{s.line.name} {s.line.version.text} needs {dep} {req.text}, "
                         + "which no version in the index that isn't yanked meets"
                     )
+        if unmet and "dependencies" not in skip:
+            raise Error("; ".join(unmet))
         if not new:
             return results
+        self.warnings.extend(unmet)
+        for s in new:
+            if s.extraction is not None and (error := s.extraction.get("error")):
+                self.warnings.append(
+                    f"{s.line.name} {s.line.version.text}: extracting its plugins failed, so the plugin index has "
+                    + f"none of them. {error}"
+                )
 
         touched = {s.line.name: lines[s.line.name] for s in new}
-        plugin_index, extractions = self._plugin_state(before, touched)
+        plugin_index, extractions = self._plugin_state(before, touched, commit=commit)
         if extractions is not None:
             for s in new:
                 extractions[s.line.name][s.line.version.text] = _t.cast("dict[str, object]", s.extraction)
@@ -384,18 +432,26 @@ class Index:
             artifacts=[(s.line, s.data) for s in new],
             extractions=extractions,
             plugin_index=plugin_index,
+            public_listing=commit,
         )
         return results
 
     def set(
-        self, targets: _c.Sequence[str], /, *, yanked: bool | None = None, deprecated: bool | None = None
-    ) -> list[Changed]:
+        self,
+        targets: _c.Sequence[str],
+        /,
+        *,
+        yanked: bool | None = None,
+        deprecated: bool | None = None,
+        commit: bool = True,
+    ) -> list[Change]:
         """Change whether versions are yanked or deprecated, the only fields of a line that may change.
 
         Args:
             targets: Each ``NS.NAME``, for every version of the collection, or ``NS.NAME:VERSION``.
             yanked: Yank or unyank them, or None to leave it.
             deprecated: Deprecate them or not, or None to leave it.
+            commit: As for ``add``.
 
         Returns:
             Each version the targets name, in order.
@@ -408,22 +464,22 @@ class Index:
         listing = self._listing()
         selected = self._select(targets, listing)
         lines = {name: self._lines(name, listing) for name, _ in selected}
-        results: list[Changed] = []
+        results: list[Change] = []
         touched: set[str] = set()
         for name, version in selected:
             i = next(i for i, line in enumerate(lines[name]) if line.version.text == version)
             old = lines[name][i]
             lines[name][i] = _with(old, yanked=yanked, deprecated=deprecated)
             changed = lines[name][i] != old
-            results.append(Changed(name, version, changed))
+            results.append(Change(name, version, "changed" if changed else "unchanged"))
             if changed:
                 touched.add(name)
         if touched:
             # Plugin lines count yanked and deprecated versions too, so they stay as they are.
-            self._commit({name: lines[name] for name in touched}, listing)
+            self._commit({name: lines[name] for name in touched}, listing, public_listing=commit)
         return results
 
-    def remove(self, targets: _c.Sequence[str], /) -> list[Changed]:
+    def remove(self, targets: _c.Sequence[str], /, *, commit: bool = True) -> list[Change]:
         """Take versions down: their lines, artifacts and extractions are deleted, and with a collection's last, its
         index file and listing entry.
 
@@ -432,6 +488,7 @@ class Index:
 
         Args:
             targets: Each ``NS.NAME``, for every version of the collection, or ``NS.NAME:VERSION``.
+            commit: As for ``add``.
 
         Returns:
             Each version removed, in order.
@@ -460,12 +517,14 @@ class Index:
                 + f"Yank these first, or remove them too. {', '.join(unmet)}"
             )
 
-        plugin_index, extractions = self._plugin_state(before, lines)
+        plugin_index, extractions = self._plugin_state(before, lines, commit=commit)
         if extractions is not None:
             for name, found in extractions.items():
                 extractions[name] = {line.version.text: found[line.version.text] for line in lines[name]}
-        self._commit(lines, listing, extractions=extractions, plugin_index=plugin_index, removed=gone)
-        return [Changed(line.name, line.version.text, True) for line in gone]
+        self._commit(
+            lines, listing, extractions=extractions, plugin_index=plugin_index, removed=gone, public_listing=commit
+        )
+        return [Change(line.name, line.version.text, "removed") for line in gone]
 
     def rebuild(
         self,
@@ -476,7 +535,7 @@ class Index:
         files: _c.Collection[str] | None = None,
         from_artifacts: bool = False,
         allow_changes: bool = False,
-    ) -> list[Rebuilt]:
+    ) -> list[Change]:
         """Make public files again from what the index knows, or with ``from_artifacts``, from the artifacts too.
 
         ``index`` is the targets' index files and ``collections.json``. From what the index knows, each version's line
@@ -495,7 +554,7 @@ class Index:
                 the index file's, which are meant to stay as they were published.
 
         Returns:
-            Each version whose plugins were extracted again, and each public file that changed.
+            Each version whose plugins were extracted again. ``files`` has the public files that changed.
 
         Raises:
             Error: The options conflict, a target isn't in the index, what's needed isn't on disk or doesn't match the
@@ -527,7 +586,7 @@ class Index:
 
         lines: dict[str, list[CollectionVersion]] = {}
         extractions: dict[str, dict[str, dict[str, object]]] = {}
-        results: list[Rebuilt] = []
+        results: list[Change] = []
         changes: list[str] = []
         with tempfile.TemporaryDirectory(prefix="alai-index-", ignore_cleanup_errors=True) as tmp:
             for i, name in enumerate(dict.fromkeys(name for name, _ in selected)):
@@ -565,9 +624,13 @@ class Index:
                             if isinstance(dest, str)
                             else plugins.failure(version, dest)
                         )
-                        results.append(
-                            Rebuilt(f"{name} {version}'s plugins", _t.cast("str | None", found[version].get("error")))
-                        )
+                        error = _t.cast("str | None", found[version].get("error"))
+                        results.append(Change(name, version, "extracted", error=error))
+                        if error:
+                            self.warnings.append(
+                                f"{name} {version}: extracting its plugins failed, so the plugin index has none of "
+                                + f"them. {error}"
+                            )
                 if do_index:
                     lines[name] = collection_lines
                 if do_plugins:
@@ -594,14 +657,14 @@ class Index:
                 for name in listing:
                     if name not in extractions:
                         extractions[name] = self._extractions(name, self._states(name, listing))
-        written = self._commit(
+        self._commit(
             lines,
             listing,
             extractions=extractions if do_plugins else None,
             plugin_index=plugin_index,
             public_listing=do_index,
         )
-        return results + [Rebuilt(path) for path in written]
+        return results
 
     def _unpack(self, name: str, state: _c.Mapping[str, object], tmp: str) -> str | artifact.ExtractError:
         """Unpack a version's artifact, checked against its state, into ``tmp``. If alai-core refuses one it once
@@ -641,10 +704,7 @@ class Index:
             info = meta.collection_info
             if (info.get_fqcn(), info.get_version().text) != (name, version):
                 raise Error(f"{where} is for {info.get_fqcn()} {info.get_version().text}")
-            raw: object = info.get("dependencies") or {}
-            deps = _t.cast("dict[str, object]", raw) if isinstance(raw, dict) else None
-            if deps is None or not all(isinstance(r, str) for r in deps.values()):
-                raise Error(f"{where} has dependencies that aren't a mapping of names to requirements")
+            deps = _raw_deps(info, where)
             requires_ansible = None
             runtime_data = _read(os.path.join(dest, "meta", "runtime.yml"))
             if runtime_data is not None:
@@ -659,7 +719,7 @@ class Index:
             **{k: v for k, v in state.items() if k != "version"},
             "name": name,
             "vers": version,
-            "deps": [{"name": n, "req": r} for n, r in _t.cast("dict[str, str]", deps).items()],
+            "deps": [{"name": n, "req": r} for n, r in deps],
             "size": size,
         }
         fields.pop("requires_ansible", None)
@@ -698,20 +758,21 @@ class Index:
         return list(selected)
 
     def _plugin_state(
-        self, before: dict[str, list[CollectionVersion]], touched: _c.Iterable[str]
+        self, before: dict[str, list[CollectionVersion]], touched: _c.Iterable[str], *, commit: bool = True
     ) -> tuple[bytes | None, dict[str, dict[str, dict[str, object]]] | None]:
-        """``plugins.jsonl`` and the touched collections' extractions, or None for each without a plugin index."""
+        """``plugins.jsonl``, unless it's not to be written, and the touched collections' extractions, or None for each
+        without a plugin index."""
         if self.config.plugins is None:
             return None, None
         path = self.file(self.config.plugins)
-        plugin_index = _read(path)
-        if plugin_index is None:
+        plugin_index = _read(path) if commit else None
+        if plugin_index is None and commit:
             raise Error(f"{path} is missing, which config.json says the index has")
         return plugin_index, {
             name: self._extractions(name, [_state(line) for line in before[name]]) for name in touched
         }
 
-    def _stage(self, path: str, tmp: str, published: str) -> _Staged:
+    def _stage(self, path: str, tmp: str, published: str, skip: _c.Collection[str]) -> _Staged:
         """Read and check an artifact, and make its line and extraction."""
         data = _read(path)
         if data is None:
@@ -729,19 +790,35 @@ class Index:
         try:
             info = collection.Manifest.parse(_read(os.path.join(dest, "MANIFEST.json")) or b"", name=path)
             meta = info.collection_info
+            name, version = meta.get_fqcn(), meta.get_version()
+            where = f"{name} {version.text}"
+            try:
+                deps = [(n, r.text) for n, r in meta.get_dependencies().items()]
+            except collection.MetadataError as e:
+                if "requirements" not in skip:
+                    raise
+                self.warnings.append(f"{where}: {e}")
+                deps = _raw_deps(meta, where)
             requires_ansible = None
             runtime_data = _read(os.path.join(dest, "meta", "runtime.yml"))
             if runtime_data is not None:
                 runtime = collection.Runtime.parse(runtime_data, name=f"{path}: meta/runtime.yml", on_warning=None)
-                if runtime.get_requires_ansible() is not None:
-                    requires_ansible = str(runtime.requires_ansible)
+                try:
+                    if runtime.get_requires_ansible() is not None:
+                        requires_ansible = str(runtime.requires_ansible)
+                except collection.MetadataError as e:
+                    if "requirements" not in skip:
+                        raise
+                    self.warnings.append(f"{where}: {e}")
+                    value = runtime.requires_ansible
+                    requires_ansible = value if isinstance(value, str) else None
             line = CollectionVersion(
-                name=meta.get_fqcn(),
-                version=meta.get_version(),
+                name=name,
+                version=version,
                 sha256=hashlib.sha256(data).hexdigest(),
                 size=len(data),
                 published=published,
-                deps=[(n, r.text) for n, r in meta.get_dependencies().items()],
+                deps=deps,
                 requires_ansible=requires_ansible,
             )
         except ValueError as e:
@@ -858,60 +935,81 @@ class Index:
         plugin_index: bytes | None = None,
         removed: _c.Sequence[CollectionVersion] = (),
         public_listing: bool = True,
-    ) -> list[str]:
-        """Write a change to the collections in ``lines``, given all their lines, and return each public file that
-        changed, by its path in the tree.
+    ) -> None:
+        """Write a change to the collections in ``lines``, given all their lines, and note each file in ``files``.
 
         Private files come first, as the source of truth, then public ones in the order that never leaves the index
         naming a file that isn't there. Artifacts, the state and extractions, index files, the private listing,
         ``plugins.jsonl`` and ``collections.json``, and last deleting what ``removed`` and collections left with no
-        lines leave behind. A file whose bytes wouldn't change isn't written.
+        lines leave behind. A file whose bytes wouldn't change isn't written. Without ``plugin_index``,
+        ``plugins.jsonl`` isn't written, and without ``public_listing``, neither is ``collections.json``.
         """
-        written: list[str] = []
+        dl_parts = urllib.parse.urlsplit(self.config.dl)
+        remote_dl = bool(dl_parts.scheme or dl_parts.netloc)
+        bases = {"dl": _dl_dir(self.root, self.dl), "index": self.root, "private": self.private}
 
-        def public(path: str, data: bytes) -> None:
+        def note(event: str, group: str, path: str) -> None:
+            if group == "artifact":
+                group = "dl" if remote_dl else "index"
+            self.files[event][group].append(os.path.relpath(path, bases[group]).replace(os.sep, "/"))
+
+        def collection_changed(name: str | None) -> None:
+            # Only a collection whose own files changed, so a batch commits no more than it has to.
+            if name is not None and name not in self.files["collections"]:
+                self.files["collections"].append(name)
+
+        def write(group: str, path: str, data: bytes, name: str | None = None) -> None:
             if _write_changed(path, data):
-                written.append(os.path.relpath(path, self.root).replace(os.sep, "/"))
+                note("written", group, path)
+                collection_changed(name)
+
+        def remove(group: str, path: str, name: str | None = None) -> None:
+            if os.path.exists(path):
+                _remove(path)
+                note("deleted", group, path)
+                collection_changed(name)
 
         for line, data in artifacts:
-            _write(self.artifact_file(line), data)
+            write("artifact", self.artifact_file(line), data, line.name)
         # Each collection's extractions are in its index file's order.
         for name, found in (extractions or {}).items():
             if lines.get(name) != []:
-                _write_changed(self.extractions_file(name), plugins.extractions_jsonl(found.values()))
+                write("private", self.extractions_file(name), plugins.extractions_jsonl(found.values()), name)
         for name, collection_lines in lines.items():
             if collection_lines:
-                _write_changed(self.state_file(name), _jsonl(_state(line) for line in collection_lines))
+                write("private", self.state_file(name), _jsonl(_state(line) for line in collection_lines), name)
 
         updated = now()
         entries = {name: e for name in listing if (e := listing.get(name)) is not None and lines.get(name) != []}
         for name, collection_lines in lines.items():
+            old = listing.get(name)
             if collection_lines:
                 # Lines added are checked before this, so only lines already there can have a problem, kept as they are.
                 data = CollectionIndex(name, collection_lines).to_jsonl(allow_unreadable=True).encode()
                 sha256 = hashlib.sha256(data).hexdigest()
-                public(self.file(self.config.index_path(name=name, sha256=sha256)), data)
-                if (old := entries.get(name)) is None or old.sha256 != sha256:
+                write("index", self.file(self.config.index_path(name=name, sha256=sha256)), data, name)
+                if old is None or old.sha256 != sha256:
                     entries[name] = CollectionEntry(updated, sha256)
+            # One found by sha256 stays, for clients with an older listing, until the caller deletes it.
+            if self.config.hashed and old is not None and entries.get(name) != old:
+                self.files["stale"].append(self.config.index_path(name=name, sha256=old.sha256))
         listed = Collections(entries).to_json().encode()
-        _write_changed(self.listing_file, listed)
+        write("private", self.listing_file, listed)
 
         if plugin_index is not None and extractions is not None and self.config.plugins is not None:
             changed = {name: plugins.plugin_lines(name, found) for name, found in extractions.items()}
-            public(self.file(self.config.plugins), plugins.merge(plugin_index, changed))
+            write("index", self.file(self.config.plugins), plugins.merge(plugin_index, changed))
         if public_listing and self.config.collections is not None:
-            public(self.file(self.config.collections), listed)
+            write("index", self.file(self.config.collections), listed)
 
         for line in removed:
-            _remove(self.artifact_file(line))
+            remove("artifact", self.artifact_file(line), line.name)
         for name, collection_lines in lines.items():
             if not collection_lines:
-                _remove(self.state_file(name))
-                _remove(self.extractions_file(name))
-                # One found by sha256 stays, for clients with an older listing, until the caller deletes it.
+                remove("private", self.state_file(name), name)
+                remove("private", self.extractions_file(name), name)
                 if not self.config.hashed:
-                    _remove(self.file(self.config.index_path(name=name)))
-        return written
+                    remove("index", self.file(self.config.index_path(name=name)), name)
 
 
 def _read(path: str) -> bytes | None:
