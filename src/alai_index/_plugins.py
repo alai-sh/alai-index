@@ -1,17 +1,8 @@
 # Copyright: (c) 2026, Jordan Borean (@jborean93) <jborean93@gmail.com>
 # MIT License (see LICENSE or https://opensource.org/licenses/MIT)
 
-"""The plugin index: each version's extraction, kept in a private file per collection, and how a collection's plugin
-lines are worked out from every version's.
-
-Each collection's private file, ``private/plugins/<namespace>/<name>.jsonl``, records what each version's artifact holds,
-so the plugin index can be worked out again without the artifacts. Each line is one version's::
-
-    {"v": 1, "version": "1.0.0", "revision": 1, "plugins": [{"type": "module", "name": "x"}], "routing": {}}
-
-or ``"error"`` in place of ``plugins`` and ``routing`` when extraction failed. There's a line for every version in the
-collection's index file, in the same order, and for no other.
-"""
+"""The plugin index: each version's plugin extraction, as cached in the private directory, and a collection's plugin lines
+worked out from every version's."""
 
 from __future__ import annotations
 
@@ -25,30 +16,46 @@ from alai_core.plugins import PluginEntry
 from alai_core.semver import Version
 
 REVISION = 1
-"""The extraction's revision, kept on each private line. Bump it when the same artifact would extract differently, so
-older lines can be told apart and redone."""
+"""The extraction's revision, kept on each extraction. Bump it when the same artifact would extract differently, so
+older extractions can be told apart and redone."""
 
 
 def extraction(path: str | os.PathLike[str], version: str, /) -> dict[str, object]:
-    """The private line for ``version`` of the collection extracted at ``path``. Plugin names, short descriptions and
+    """The extraction of ``version`` of the collection extracted at ``path``. Plugin names, short descriptions and
     routing, or the error if extraction failed, which costs the plugin index that version's plugins but never the
     version itself."""
-    line: dict[str, object] = {"v": 1, "version": version, "revision": REVISION}
     try:
         result = extract.extract(path)
     except Exception as e:  # Untrusted input, so any failure is data, not a crash.
-        return {**line, "error": f"{type(e).__name__}: {e}"}
+        return failure(version, e)
     plugins: list[dict[str, str]] = []
     for p in result.plugins:
         entry = {"type": p.type, "name": p.name}
         if p.short_description:
             entry["short_description"] = p.short_description
         plugins.append(entry)
-    return {**line, "plugins": plugins, "routing": {f"{r.type}:{r.name}": r.entry for r in result.routing}}
+    return {
+        "v": 1,
+        "version": version,
+        "revision": REVISION,
+        "plugins": plugins,
+        "routing": {f"{r.type}:{r.name}": r.entry for r in result.routing},
+    }
 
 
-def read_private(data: bytes, path: str, /) -> dict[str, dict[str, object]]:
-    """A collection's private file, each line by version.
+def failure(version: str, error: Exception, /) -> dict[str, object]:
+    """The extraction of a version that failed."""
+    return {"v": 1, "version": version, "revision": REVISION, "error": f"{type(error).__name__}: {error}"}
+
+
+def current(line: _c.Mapping[str, object], /) -> bool:
+    """Whether an extraction succeeded, by this revision or a later one, so needn't be redone."""
+    revision = line.get("revision")
+    return "error" not in line and isinstance(revision, int) and revision >= REVISION
+
+
+def read_extractions(data: bytes, path: str, /) -> dict[str, dict[str, object]]:
+    """A collection's extractions file, each extraction by version.
 
     Raises:
         ValueError: A line can't be read, or needs a newer alai-index.
@@ -68,8 +75,8 @@ def read_private(data: bytes, path: str, /) -> dict[str, dict[str, object]]:
     return lines
 
 
-def private_jsonl(lines: _c.Iterable[_c.Mapping[str, object]], /) -> bytes:
-    """A collection's private file, from its lines in index file order."""
+def extractions_jsonl(lines: _c.Iterable[_c.Mapping[str, object]], /) -> bytes:
+    """A collection's extractions file, from its extractions in index file order."""
     return "".join(json.dumps(line, separators=(",", ":")) + "\n" for line in lines).encode()
 
 
