@@ -158,11 +158,11 @@ def test_extraction_still_fails(root: Path, monkeypatch: pytest.MonkeyPatch) -> 
 
     tree = index.Index(root)
     assert tree.rebuild(["ns.other"], files=["plugins"], from_artifacts=True) == [
-        index.Change("ns.other", "1.0.0", "extracted", error="ValueError: boom")
+        index.Change("ns.other", "1.0.0", "extracted", {"error": "ValueError: boom"})
     ]
     assert tree.files["written"]["index"] == ["plugins.jsonl"]
     assert tree.warnings == [
-        "ns.other 1.0.0: extracting its plugins failed, so the plugin index has none of them. ValueError: boom"
+        "extracting the plugins of ns.other 1.0.0 failed, so the plugin index has none of them. ValueError: boom"
     ]
     assert [p["name"] for p in _lines(root / "plugins.jsonl")] == ["new", "old"]
 

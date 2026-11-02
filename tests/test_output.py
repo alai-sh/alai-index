@@ -33,7 +33,7 @@ def test_add(tmp_path: Path, root: str, capsys: pytest.CaptureFixture[str]) -> N
     sha256 = hashlib.sha256(tarball.read_bytes()).hexdigest()
 
     assert _json(capsys, ["add", "--root", root, "--output-format", "json", str(tarball)]) == {
-        "versions": [{"name": "ns.coll", "version": "1.0.0", "sha256": sha256, "result": "added"}],
+        "versions": [{"name": "ns.coll", "version": "1.0.0", "result": "added", "details": {"sha256": sha256}}],
         "collections": ["ns.coll"],
         "written": {
             "dl": [],
@@ -62,7 +62,9 @@ def test_remove(tmp_path: Path, root: str, capsys: pytest.CaptureFixture[str]) -
     main(["add", "--root", root, str(tarball)])
 
     out = _json(capsys, ["remove", "--root", root, "--output-format", "json", "ns.coll"])
-    assert out["versions"] == [{"name": "ns.coll", "version": "1.0.0", "result": "removed"}]
+    assert out["versions"] == [
+        {"name": "ns.coll", "version": "1.0.0", "result": "removed", "details": {"sha256": sha256}}
+    ]
     assert out["deleted"] == {
         "dl": [],
         "index": [f"dl/{sha256[:2]}/{sha256}.tar.gz", "index/ns/coll.jsonl"],
@@ -129,9 +131,10 @@ def test_warnings_go_to_stderr(tmp_path: Path, root: str, capsys: pytest.Capture
     assert main(argv) == 0
     captured = capsys.readouterr()
     assert json.loads(captured.out)["versions"][0]["result"] == "added"
-    assert captured.err == (
-        "warning: ns.coll 1.0.0 needs ns.missing *, which no version in the index that isn't yanked meets\n"
-    )
+    assert captured.err.splitlines() == [
+        f"reading {tarball}",
+        "warning: ns.coll 1.0.0 needs ns.missing *, which no version in the index that isn't yanked meets",
+    ]
 
 
 def test_skippable_matches_the_index() -> None:
@@ -147,4 +150,5 @@ def test_nothing_changed(tmp_path: Path, root: str, capsys: pytest.CaptureFixtur
     assert _json(capsys, ["rebuild", "--root", root, "--all", "--output-format", "json"]) == {"versions": [], **nothing}
     assert _json(capsys, ["add", "--root", root, "--output-format", "json", tarball])["collections"] == []
     out = _json(capsys, ["set", "--root", root, "--output-format", "json", "ns.coll", "--no-yanked"])
-    assert out == {"versions": [{"name": "ns.coll", "version": "1.0.0", "result": "unchanged"}], **nothing}
+    unchanged: dict[str, object] = {"name": "ns.coll", "version": "1.0.0", "result": "unchanged", "details": {}}
+    assert out == {"versions": [unchanged], **nothing}

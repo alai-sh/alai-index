@@ -43,8 +43,8 @@ def test_add(tmp_path: Path, root: Path) -> None:
     added = index.Index(root).add([tarball, dep], published=PUBLISHED)
 
     assert added == [
-        index.Change("ns.coll", "1.0.0", "added", sha256=sha256),
-        index.Change("ns.dep", "1.0.0", "added", sha256=_sha256(dep)),
+        index.Change("ns.coll", "1.0.0", "added", {"sha256": sha256}),
+        index.Change("ns.dep", "1.0.0", "added", {"sha256": _sha256(dep)}),
     ]
     assert (root / "dl" / sha256[:2] / f"{sha256}.tar.gz").read_bytes() == tarball.read_bytes()
     assert _lines(root / "index" / "ns" / "coll.jsonl") == [
@@ -91,7 +91,7 @@ def test_add_again_is_a_no_op(tmp_path: Path, root: Path) -> None:
 
     assert (
         index.Index(root).add([tarball, tarball])
-        == [index.Change("ns.coll", "1.0.0", "exists", sha256=_sha256(tarball))] * 2
+        == [index.Change("ns.coll", "1.0.0", "exists", {"sha256": _sha256(tarball)})] * 2
     )
     assert (root / "collections.json").read_bytes() == before
 
@@ -307,7 +307,8 @@ def test_skip_requirements(tmp_path: Path, root: Path) -> None:
 
     line = _lines(root / "index" / "ns" / "coll.jsonl")[0]
     assert (line["deps"], line["requires_ansible"]) == ([{"name": "ns.missing", "req": "^1.0"}], "not a specifier")
-    assert [w.split(":")[0] for w in tree.warnings] == ["ns.coll 1.0.0", "ns.coll 1.0.0"]
+    assert len(tree.warnings) == 2
+    assert all(w.startswith("ns.coll 1.0.0 has a requirement ansible-core can't read. ") for w in tree.warnings)
 
 
 def test_name_and_version_are_always_checked(tmp_path: Path, root: Path) -> None:
@@ -326,5 +327,5 @@ def test_failed_extraction_warns(tmp_path: Path, root: Path, monkeypatch: pytest
     tree.add([build_collection(tmp_path / "a.tar.gz")])
 
     assert tree.warnings == [
-        "ns.coll 1.0.0: extracting its plugins failed, so the plugin index has none of them. ValueError: boom"
+        "extracting the plugins of ns.coll 1.0.0 failed, so the plugin index has none of them. ValueError: boom"
     ]
