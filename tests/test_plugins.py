@@ -11,7 +11,7 @@ from alai_index import _plugins as plugins
 
 def _extraction(*names: str, routing: dict[str, dict[str, object]] | None = None) -> dict[str, object]:
     return {
-        "revision": plugins.REVISION,
+        "v": plugins.CURRENT,
         "plugins": [{"type": "module", "name": n, "short_description": f"{n} desc"} for n in names],
         "routing": routing or {},
     }
@@ -69,7 +69,7 @@ def test_routing_from_latest_and_without_a_plugin() -> None:
 
 
 def test_failed_extraction_has_no_plugins() -> None:
-    failed = {"revision": plugins.REVISION, "error": "ValueError: bad"}
+    failed = {"v": plugins.CURRENT, "error": "ValueError: bad"}
 
     assert _lines({"1.0.0": failed}) == []
     # Its plugins aren't known, so it doesn't end any either.
@@ -83,7 +83,11 @@ def test_merge_replaces_only_the_collections_given() -> None:
     )
     new = plugins.plugin_lines("ns.coll", {"1.0.0": _extraction("a")})
 
-    assert plugins.merge(existing, {"ns.coll": new}).splitlines() == [
+    assert plugins.merge(existing, {"ns.coll": new}, {"ns.coll", "other.coll"}).splitlines() == [
         b'{"v":1,"type":"module","name":"a","collection":"ns.coll","since":"1.0.0","short_description":"a desc"}',
         b'{"v":1,"type":"module","name":"z","collection":"other.coll","unknown":1}',
+    ]
+    # A collection the index doesn't have loses its lines.
+    assert plugins.merge(existing, {"ns.coll": new}, {"ns.coll"}).splitlines() == [
+        b'{"v":1,"type":"module","name":"a","collection":"ns.coll","since":"1.0.0","short_description":"a desc"}',
     ]

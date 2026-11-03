@@ -19,22 +19,24 @@ $ python -m http.server -d my-index
 
 | Command | |
 |---|---|
-| `config [--index TEMPLATE] [--dl-template TEMPLATE] [--[no-]listing] [--[no-]plugins]` | Write `config.json`. An option left out keeps its current value, or takes its default when there isn't one. By default, index files are by name as `index/{namespace}/{name}.jsonl` and artifacts are in the `--dl` directory as `dl/{sha256-prefix}/{sha256-checksum}.tar.gz`. The default config also has a `collections.json` listing and a `plugins.jsonl` plugin index. `config.json` can't change once the index has collections. See [Artifacts](#artifacts) |
-| `add TARBALL... [--published TIME] [--skip-checks CHECK]... [--no-commit]` | Add collection artifacts. Each version is read from its own `MANIFEST.json` and `meta/runtime.yml`. A version already in the index with the same artifact is skipped, and one with another artifact is refused. Every dependency must be met by a version that isn't yanked, either in the index already or among the tarballs. Every requirement must be one ansible-core can read. When mirroring another source one to one, such as Galaxy, `--skip-checks dependencies` or `--skip-checks requirements` can make those checks warnings instead. A client may fail to use a collection added with a check skipped. The artifact, its `MANIFEST.json` and its name and version are always checked, even with `--skip-checks` |
-| `set NS.NAME[:VERSION]... [--[no-]yanked] [--[no-]deprecated] [--no-commit]` | Change whether versions are yanked or deprecated, the only things about a version that can change. `NS.NAME` alone is every version of it. A yanked version stays installable when a lock file pins it, and is skipped otherwise |
-| `remove NS.NAME[:VERSION]... [--no-commit]` | Take versions down, deleting their lines, artifacts and plugin extractions. Lock files pinning them stop working. When a remaining version that isn't yanked would be left without a version it needs, `remove` refuses, so yank that version first or remove it too |
-| `rebuild [NS.NAME[:VERSION]... \| --all] [--files index\|plugins]... [--from-artifacts] [--allow-changes]` | Make public files again, from what the index knows or from the artifacts. See [Rebuilding](#rebuilding) |
-| `galaxy-mirror SERVER [NS.NAME... \| --all] [--limit N] [--session FILE] [--revalidate] [--no-commit] [--strict]` | Bring collections in line with a Galaxy server. See [Mirroring a Galaxy server](#mirroring-a-galaxy-server) |
+| `config [--index TEMPLATE] [--dl-template TEMPLATE] [--[no-]listing] [--[no-]plugins]` | Write `config.json`. An option left out keeps its current value, or takes its default when there isn't one. By default, index files are by name as `index/{namespace}/{name}.jsonl` and artifacts are in the `--dl` directory as `dl/{sha256-prefix}/{sha256-checksum}.tar.gz`. The default config also has a `collections.json` listing and a `plugins.jsonl` plugin index. Once the index has collections, the templates can't change, as files would be left where the old ones put them. Whether the index has a listing or a plugin index can still change. See [Artifacts](#artifacts) |
+| `add TARBALL... [--published TIME] [--skip-checks CHECK]...` | Add collection artifacts. Each version is read from its own `MANIFEST.json` and `meta/runtime.yml`. A version already in the index with the same artifact is skipped, and one with another artifact is refused. Every dependency must be met by a version that isn't yanked, either in the index already or among the tarballs. Every requirement must be one ansible-core can read. When mirroring another source one to one, such as Galaxy, `--skip-checks dependencies` or `--skip-checks requirements` can make those checks warnings instead. A client may fail to use a collection added with a check skipped. The artifact, its `MANIFEST.json` and its name and version are always checked, even with `--skip-checks` |
+| `set NS.NAME[:VERSION]... [--[no-]yanked] [--[no-]deprecated]` | Change whether versions are yanked or deprecated. `NS.NAME` alone is every version of it. A yanked version stays installable when a lock file pins it, and is skipped otherwise |
+| `remove NS.NAME[:VERSION]...` | Take versions down, deleting their lines, artifacts and plugin extractions. Lock files pinning them stop working. When a remaining version that isn't yanked would be left without a version it needs, `remove` refuses, so yank that version first or remove it too |
+| `generate-indexes [NS.NAME[:VERSION]...]` | Make index lines again from the artifacts. See [Generating the index files](#generating-the-index-files) |
+| `generate-plugins [NS.NAME[:VERSION]...] [--from-plugin-cache]` | Extract plugins again and work `plugins.jsonl` out again. See [Generating the plugin index](#generating-the-plugin-index) |
+| `galaxy-mirror SERVER [NS.NAME... \| --all] [--limit N] [--session FILE] [--checked FILE] [--revalidate] [--strict]` | Bring collections in line with a Galaxy server. See [Mirroring a Galaxy server](#mirroring-a-galaxy-server) |
 | `generate-shell-completion SHELL` | Print the script that enables Tab completion. See [Shell completion](#shell-completion) |
 
 Every command but `generate-shell-completion` takes these options.
 
 - `--root DIR` is the index's directory, and is the current directory by
   default.
-- `--private DIR` is the directory of the index's own state, and is
-  `private/` in the root by default. Like `--root`, the path is relative to
-  the current directory. When the index tree should hold only the files that
-  are published, `--private` can point outside the root.
+- `--plugin-cache DIR` is the directory of the plugin cache, and is
+  `plugin-cache/` in the root by default. Like `--root`, the path is relative
+  to the current directory. When the index tree should hold only the files
+  that are published, `--plugin-cache` can point outside the root. See
+  [The plugin cache](#the-plugin-cache).
 - `--dl DIR` is the directory of the artifacts, and is `dl/` in the root by
   default. Like `--root`, the path is relative to the current directory. See
   [Artifacts](#artifacts).
@@ -43,12 +45,21 @@ Every command but `generate-shell-completion` takes these options.
 - `-v` or `--verbose` also shows each request to a server and how long it
   took.
 
+Every command that changes the index also takes `--output-format text|json`.
+That's `add`, `set`, `remove`, `generate-indexes`, `generate-plugins` and
+`galaxy-mirror`.
+
+- `--output-format text` prints what changed as a line for each version, and
+  is the default.
+- `--output-format json` prints one JSON object instead, for a program
+  publishing the index. See [Running it from a program](#running-it-from-a-program).
+
 By default, a command shows what it's doing on stderr as it does it and
 prints its warnings at the end. stdout is only ever the command's output.
 
 When there are too many collections to fit on the command line, they can be
 put in a file with one on each line and passed as `@FILE`, such as
-`alai-index rebuild @changed-collections.txt`. Each line is read as one
+`alai-index generate-plugins @changed-collections.txt`. Each line is read as one
 argument, exactly as it's written.
 
 ## Mirroring a Galaxy server
@@ -87,10 +98,11 @@ $ alai-index galaxy-mirror https://galaxy.example.com --all --limit 100
 - **Versions already in the index are checked** against the server's sha256
   checksum when they're yanked, when the server's `created_at` differs from the
   index's `published`, or with `--revalidate`. A yanked version the server
-  lists again is unyanked. If the server now serves a different artifact, a
-  `conflict` is reported with the artifact's details for further analysis.
-  `galaxy-mirror` never replaces a version's artifact, as versions are
-  immutable.
+  lists again is unyanked. A version the server still serves with the same
+  artifact is reported as `unchanged`. If the server now serves a different
+  artifact, a `conflict` is reported with the artifact's details for further
+  analysis. `galaxy-mirror` never replaces a version's artifact, as versions
+  are immutable.
 - **The collection's deprecation** is set on every version.
 
 A version that fails is reported as a warning and the mirror carries on with
@@ -108,40 +120,58 @@ done, and `--revalidate` always lists it again. As nothing in a session file
 is checked for being out of date, start a new one for each mirror and only
 use it for runs close together against the same server.
 
+A version the server serves with another artifact keeps a `created_at` that
+differs from the index's `published`, so every later run checks it again.
+When that costs too many requests, `--checked FILE` can be used to skip
+versions already checked. The file is kept by the caller, and holds the
+server's `created_at` already checked for each version.
+
+```json
+{"corp.tools": {"1.0.0": "2026-05-01T00:00:00Z"}}
+```
+
+A version is then checked again only when the server's `created_at` differs
+from the one in the file. The `published` in each `conflict` and `unchanged`
+result is the time to keep in the file. An `unchanged` result means the server
+serves the index's artifact again, so its entry can be dropped.
+
 With `--output-format json`, each version's result is one of those in
 [Results](#results).
 
 ## Running it from a program
 
 When running alai-index from another program, `add`, `set`, `remove`,
-`rebuild` and `galaxy-mirror` can be given `--output-format json` to print
-one JSON object to stdout. The object looks like the following.
+`generate-indexes`, `generate-plugins` and `galaxy-mirror` can be given
+`--output-format json` to print one JSON object to stdout. The object looks
+like the following.
 
 ```json
 {
   "versions": [{"name": "ns.coll", "version": "1.0.0", "result": "added", "details": {"sha256": "…"}}],
-  "collections": ["ns.coll"],
   "written": {
     "dl": [],
     "index": ["dl/ab/ab40….tar.gz", "index/ns/coll.jsonl", "plugins.jsonl", "collections.json"],
-    "private": ["cache/plugins/ns/coll.jsonl", "index/ns/coll.jsonl", "collections.json"]
+    "plugin-cache": ["ns/coll.jsonl"]
   },
-  "deleted": {"dl": [], "index": [], "private": []},
-  "stale": []
+  "deleted": {"dl": [], "index": [], "plugin-cache": []},
+  "stale": [],
+  "outdated": []
 }
 ```
 
 | Key | |
 |---|---|
 | `versions` | Each version the command acted on, as an object. The object holds the collection's `name` and the `version`, with the `result` and its `details`. `version` is `null` when the entry is for the whole collection. See [Results](#results) |
-| `collections` | Each collection with a file written or deleted. A command that changed nothing gives none |
-| `written`, `deleted` | Each file written or deleted, split into three groups. `dl` holds the artifacts published to another host, relative to `--dl`. `index` holds the files published with the index, relative to the root and in the order to publish them. `private` holds the private state, relative to `--private` |
+| `written`, `deleted` | Each file written or deleted, split into three groups. `dl` holds the artifacts published to another host, relative to `--dl`. `index` holds the files published with the index, relative to the root and in the order to publish them. `plugin-cache` holds the plugin cache's files, relative to `--plugin-cache` |
 | `stale` | Each index file that the listing no longer names, when index files are found by sha256. Once cached copies of the old `collections.json` have expired, the file can be deleted from the host |
+| `outdated` | Each version whose plugin extraction is missing or out of date, and whose artifact wasn't on disk to extract it again. Each entry has the `name` and `version`, and the artifact's path in `dl` or `index`, as `written` gives paths. See [The plugin cache](#the-plugin-cache) |
 
 Publish `dl` first and then `index` in its order, and delete what `deleted`
-lists after that. Warnings and errors always go to stderr, so stdout is only
-the JSON. A command that fails exits with code 1. The JSON only ever gains
-keys, and a key never changes meaning, so it has no version.
+lists after that. `plugin-cache` is never published, but a program that keeps
+the plugin cache somewhere else stores those files there. Warnings and errors
+always go to stderr, so stdout is only the JSON. A command that fails exits
+with code 1. The JSON only ever gains keys, and a key never changes meaning,
+so it has no version.
 
 ### Results
 
@@ -151,15 +181,14 @@ lists each result, the commands that give it and what its `details` hold.
 
 | `result` | Given by | Means | `details` |
 |---|---|---|---|
-| `added` | `add`, `galaxy-mirror` | The version was added | `sha256` is the artifact's sha256 checksum |
-| `changed` | `set`, `galaxy-mirror` | The version's `yanked` or `deprecated` changed | The fields that changed and their new values, such as `{"yanked": true}` |
-| `conflict` | `galaxy-mirror` | The server serves another artifact for a version the index has. The index's artifact is kept | `sha256` is the sha256 checksum of the artifact the server serves now, and `url` is where to download it |
+| `added` | `add`, `galaxy-mirror` | The version was added | `sha256` is the artifact's sha256 checksum. When extracting its plugins failed, `error` says why and the plugin index has none of the version's plugins |
+| `changed` | `set`, `generate-indexes`, `galaxy-mirror` | The version's line changed | The fields that changed and their new values, such as `{"yanked": true}`. A field the line no longer has is `null` |
+| `conflict` | `galaxy-mirror` | The server serves another artifact for a version the index has. The index's artifact is kept | `sha256` is the sha256 checksum of the artifact the server serves now, and `url` is where to download it. `published` is when the server says that artifact was published, or `null` when it doesn't say |
 | `deferred` | `galaxy-mirror` | The version still needs mirroring, but `--limit` was reached before it, so it's left for a later run. Versions mirrored before the limit have the result `added`. When `version` is `null`, the whole collection was left for a later run without being looked at. Which of its versions are missing isn't known yet | None |
-| `exists` | `add` | The version was already in the index, with the same artifact | `sha256` is the artifact's sha256 checksum |
-| `extracted` | `rebuild --from-artifacts` | The version's plugins were extracted again | When extracting failed, `error` says why and the plugin index has none of the version's plugins |
+| `extracted` | `add`, `remove`, `generate-plugins`, `galaxy-mirror` | The version's plugins were extracted again from its artifact, as `generate-plugins` does, or as its extraction in the plugin cache was missing or out of date | When extracting failed, `error` says why and the plugin index has none of the version's plugins |
 | `failed` | `galaxy-mirror` | The version couldn't be mirrored, or the whole collection couldn't when `version` is `null`. The mirror carried on with the rest | `kind` is the kind of failure, from the table below, and `error` is the error message |
 | `removed` | `remove` | The version, its artifact and its plugin extraction were deleted | `sha256` is the removed artifact's sha256 checksum |
-| `unchanged` | `set` | The version was already as asked | None |
+| `unchanged` | `add`, `set`, `galaxy-mirror` | The version was looked at and nothing about it changed. From `add`, it was already in the index with the same artifact. From `set`, it was already as asked. From `galaxy-mirror`, it was checked against the server, which serves the index's artifact | From `add`, `sha256` is the artifact's sha256 checksum. From `galaxy-mirror`, `sha256` is the artifact's sha256 checksum. `published` is when the server says it was published, or `null` when it doesn't say. None from `set` |
 
 A `failed` result's `kind` is one of these.
 
@@ -171,24 +200,6 @@ A `failed` result's `kind` is one of these.
 | `galaxy_unavailable` | A timeout, a `429` or a `5xx` that retrying didn't get past. Trying again later may work |
 | `manifest_mismatch` | The artifact's `MANIFEST.json` is for another collection or version |
 | `sha256_mismatch` | The download doesn't match the sha256 the server gives |
-
-### Batching changes
-
-When making many changes to a large index, rewriting `plugins.jsonl` and
-`collections.json` after each `add`, `set` or `remove` takes most of the
-time. `--no-commit` can be used to leave the two files as they are, and a
-`rebuild` of the changed collections then writes them once at the end.
-
-```console
-$ alai-index add --no-commit --output-format json a.tar.gz > a.json
-$ alai-index add --no-commit --output-format json b.tar.gz > b.json
-$ jq -r '.collections[]' a.json b.json | sort -u > changed.txt
-$ alai-index rebuild @changed.txt
-```
-
-Every other file is written straight away, including the private state, but
-`plugins.jsonl` and `collections.json` don't show the changes until the
-`rebuild`.
 
 ## Shell completion
 
@@ -216,60 +227,74 @@ gives the following tree.
 ```text
 my-index/
 ├── config.json
-├── collections.json              public, made from the private state
-├── plugins.jsonl                 public, made from the private state
+├── collections.json              every collection and its current index file
+├── plugins.jsonl                 made from the plugin cache
 ├── index/
 │   └── ns/
-│       └── name.jsonl            public, one line per version
+│       └── name.jsonl            one line per version
 ├── dl/
 │   ├── 15/
 │   │   └── 1531a523….tar.gz      artifacts, by sha256
 │   └── ab/
 │       └── ab401fdd….tar.gz
-└── private/                      never published, must be kept
-    ├── collections.json          state: every collection and its current index file
-    ├── index/
-    │   └── ns/
-    │       └── name.jsonl        state: each version's sha256, published time, yanked and deprecated
-    └── cache/                    made from the artifacts, kept so changes needn't unpack them
-        └── plugins/
-            └── ns/
-                └── name.jsonl    each version's plugin extraction
+└── plugin-cache/                 never published, made from the artifacts
+    └── ns/
+        └── name.jsonl            each version's plugin extraction
 ```
 
 ### What's the source of truth
 
-`config.json`, the index's state in `private/`, and the artifacts in `dl/`
-are the source of truth. **Everything clients read is derived from them**, so
-it can always be made again.
+`config.json`, `collections.json`, the index files and the artifacts are the
+source of truth. An index file's lines hold everything about each version.
+Some fields are set by the index, such as `published`, `yanked` and
+`deprecated`. Others are read from the artifact when it's added, such as
+`deps`, `requires_ansible` and `size`. The fields read from the artifact are
+meant to stay as they were published, so they're kept in the line rather than
+read again.
+`collections.json` says which index file is each collection's current one.
 
-| Public file | Made from |
-|---|---|
-| An index file's lines | Each version's private state (`sha256`, `published`, `yanked`, `deprecated`), with `deps`, `requires_ansible` and `size` from its artifact's `MANIFEST.json` and `meta/runtime.yml` |
-| `collections.json` | A copy of `private/collections.json`. An index configured without a public listing has no `collections.json` |
-| `plugins.jsonl` | Each version's plugin extraction, from its artifact, cached in `private/cache/plugins/` |
+`plugins.jsonl` is the only file made from something else. It's made from the
+plugin cache, which can always be made again from the artifacts. It only ever
+describes collections the index has, so whenever it's written, a line for any
+other collection is dropped.
 
-Unpacking every artifact on every command would be far too slow, so commands
-read the values derived from the artifacts from where they're already kept.
-`deps`, `requires_ansible` and `size` come from the current index file, and
-the plugin extractions come from `private/cache/`. The cache is what lets a
-new version be added without unpacking every earlier one, as a collection's
-plugin lines need every version's extraction. A command fails if an index
-file doesn't match the private state or the cache is missing a version, and
-[`rebuild`](#rebuilding) can make any lost public file again.
+A command refuses when an index file is missing, or isn't the one
+`collections.json` names. An index file that's lost can't be made again from
+the artifacts, as the artifacts don't hold what the index set. Back up the
+published index, as [Backing up and restoring](#backing-up-and-restoring)
+describes.
 
-> [!WARNING]
-> `private/` is alai-index's internal state, **not an interface**. The
-> private directory isn't part of the index format and is never published.
-> Its layout and file formats can change in any alai-index release without
-> notice. What's described here is only so you know what to keep. Other
-> tools should never read or write the private directory, and should read the
-> public files that follow the index format instead.
+When `config.json` says the index has no listing, `collections.json` is still
+kept in the tree, as alai-index needs it. Whether it's published is up to
+whoever hosts the index, so leave it out of the upload or have the host
+refuse it.
 
-The `private/` directory must be kept, as the index can't be changed without
-it and would have to be created again. The private directory can be kept with
-the rest of the tree or wherever you keep state, and must be fetched back
-before changing the index from another machine.
+### The plugin cache
+
+A collection's lines in `plugins.jsonl` are worked out from every version's
+plugins. Unpacking every artifact on every change would be far too slow, so
+each version's plugin extraction is kept in the plugin cache. The cache has a
+file for each collection at `<namespace>/<name>.jsonl`, and is never
+published.
+
+The path of each collection's file is fixed, so a program can fetch it before
+running a command. What's in the file is alai-index's own and can change in
+any release. Each extraction is numbered, so a newer alai-index knows which
+ones were made by an older extractor.
+
+- **A missing or out of date extraction** is made again from the version's
+  artifact when a command works on the collection and the artifact is on
+  disk. The version is reported as `extracted`.
+- **When the artifact isn't on disk**, the version is listed in `outdated`.
+  An out of date extraction is still used until it's made again. A
+  collection missing an extraction keeps the lines it has in
+  `plugins.jsonl`.
+- **An extraction made by a newer alai-index** makes the command refuse, as
+  this alai-index can't use it. Use the newer alai-index, or delete the
+  collection's file to extract its plugins again.
+
+Losing the plugin cache only costs extracting the plugins again, as
+[`generate-plugins`](#generating-the-plugin-index) does from the artifacts.
 
 ### Artifacts
 
@@ -289,56 +314,60 @@ When `--dl` is outside the index, `--dl-template` must be given, as clients
 can only find artifacts by a path in the index when the artifacts are inside
 it.
 
-### Rebuilding
+### Generating the index files
 
-`rebuild` makes public files again, and two choices decide what it does.
+`generate-indexes` makes index lines again from the artifacts, as `add` makes
+them. Each version's `published`, `yanked` and `deprecated` are kept, as only
+the index knows them. Everything else is read again from the artifact's
+`MANIFEST.json` and `meta/runtime.yml`. When a new alai-index reads artifacts
+differently, such as a field added or a fix, `generate-indexes` brings the
+existing lines up to date.
 
-**Which files.** `--files index` is the index files and `collections.json`,
-and `--files plugins` is `plugins.jsonl`. `rebuild` makes both by default,
-and `--files` can be given twice to name both. The targets are collections or
-single versions as `NS.NAME:VERSION`, and `--all` targets every collection
-instead. Without targets or `--all`, only `collections.json` and `plugins.jsonl` are
-made again.
+Without collections, `generate-indexes` covers every collection. A collection
+or a single version as `NS.NAME:VERSION` limits it to a scoped fix. Each
+version whose line changes is reported as `changed` with the new values, so
+the output shows exactly what changed. The artifacts must be on disk.
 
-**Where the data comes from.**
+### Generating the plugin index
 
-| | From what the index knows (the default) | `--from-artifacts` |
-|---|---|---|
-| `index` | Each version's private state, with `deps`, `requires_ansible` and `size` from its current index file. `collections.json` from the private listing | `deps`, `requires_ansible` and `size` are read again from each targeted version's artifact |
-| `plugins` | The plugin extractions in the private state | Each targeted version's plugins are extracted again from its artifact, then `plugins.jsonl` is made from them |
+`generate-plugins` extracts each version's plugins again from its artifact,
+then works `plugins.jsonl` out again. Without collections, it covers every
+collection, and a lost `plugins.jsonl` is made again. With collections, only
+their lines are worked out again and merged in. The artifacts must be on
+disk.
 
-What the index knows is enough unless the data itself has to change. Reading
-the artifacts means unpacking every targeted version, so `--from-artifacts`
-needs targets or `--all`. The artifacts must also be on disk.
+When the artifacts aren't on disk, or extracting them all again would take
+too long, `--from-plugin-cache` works `plugins.jsonl` out from the plugin
+cache instead. Only an extraction that's missing or out of date is made again
+from its artifact, and one whose artifact isn't on disk is listed in
+`outdated`.
 
 | When | Run |
 |---|---|
-| `collections.json` or `plugins.jsonl` is lost or wrong | `rebuild` |
-| The line format changed, such as a field dropped, or an index file is wrong in what the private state holds (`sha256`, `published`, `yanked`, `deprecated`) | `rebuild NS.NAME --files index`, or `--all` |
-| An index file is wrong in `deps`, `requires_ansible` or `size` | `rebuild NS.NAME --files index --from-artifacts --allow-changes` |
-| An index file can't be read | `rebuild NS.NAME --files index --from-artifacts` |
-| How `plugins.jsonl` is worked out changed, such as the `since` and `until` rules | `rebuild --files plugins` |
-| An index file is lost, or a field is read from artifacts that wasn't before, or is read differently | `rebuild NS.NAME --files index --from-artifacts`, or `--all` |
-| Extraction changed, a collection's extractions are lost, or a failed extraction should be tried again | `rebuild NS.NAME --files plugins --from-artifacts`, or `--all` |
+| `plugins.jsonl` is lost or wrong | `generate-plugins --from-plugin-cache` |
+| How `plugins.jsonl` is worked out changed, such as the `since` and `until` rules | `generate-plugins --from-plugin-cache` |
+| Extraction changed with a new alai-index | `generate-plugins --from-plugin-cache`, which extracts again only what's out of date |
+| The plugin cache is lost | `generate-plugins`, which extracts every version again |
+| A failed extraction should be tried again, or the cache is suspect | `generate-plugins NS.NAME`, or `generate-plugins` for every collection |
+| A plugin index is added to an index that has collections | `config --plugins`, then `generate-plugins` |
 
-`deps`, `requires_ansible` and `size` are meant to stay as they were
-published. When an artifact gives values for them that differ from the index
-file, `--from-artifacts` writes nothing and names each version that differs.
-When the artifact's values are the right ones, `--allow-changes` writes them
-anyway.
+When both the index files and the plugin index have to be made again, run
+`generate-indexes` and then `generate-plugins`.
 
 ### Publishing
 
-When publishing a changed tree, upload everything but `private/`. When
+When publishing a changed tree, upload everything but the plugin cache. When
 updating a live index, publish the files in the following order.
 
 1. **dl/**
 2. **index/**
-3. **plugins.jsonl**
-4. **collections.json**
+3. **plugins.jsonl**, when `config.json` has a plugin index
+4. **collections.json**, when `config.json` has a listing
 
 Publishing in this order ensures an index never names a file that is not there
-yet.
+yet. `collections.json` is always in the tree, as alai-index needs it. When
+`config.json` has no listing, leave it out of the upload or have the host
+refuse it.
 
 When index files are found by sha256, an index file that a change replaces
 stays in the tree and is reported in `stale`. Only clients still holding an
@@ -348,61 +377,37 @@ the replaced file can be deleted.
 
 ## Backing up and restoring
 
-While the whole index could be backed up, the following three items can be
-used to rebuild the entire public index if needed.
+The published index holds everything that can't be made again. Back up
+`config.json`, `collections.json`, the index files and the artifacts. The
+artifacts are most of a backup's size, so a host they're published to can
+serve as their backup when they can be fetched back from it. Take the backup
+while no command is running, so `collections.json` names the index files
+that are in it.
 
-- `config.json`, as nothing else holds the index's settings.
-- The private directory, which is `private/` unless `--private` puts it
-  elsewhere. `private/cache/` can be left out, as the restore makes it again.
-- The artifacts, which are in `dl/` unless `--dl` puts them elsewhere. The
-  artifacts are most of a backup's size, so a host they're published to can
-  serve as their backup when they can be fetched back from it.
+When index files are found by sha256, only each collection's current index
+file needs backing up. A stale index file only matters to a client still
+using a cached copy of an old `collections.json`.
 
-Take the backup while no command is running, so the private state and the
-artifacts match.
-
-To restore, put the three back where they were, then make everything else
-again from the artifacts.
+To restore, put the files back where they were, then make `plugins.jsonl`
+and the plugin cache again from the artifacts.
 
 ```console
-$ alai-index rebuild --root my-index --all --from-artifacts
+$ alai-index generate-plugins --root my-index
 ```
 
-The rebuild reads every artifact once and makes the index files, the plugin
-cache, `collections.json` and `plugins.jsonl` from them. Nothing is taken
-from a cache, so nothing stale from the backup survives, and the tree can then
-be published as usual.
-
-When index files are found by sha256, the restore only makes each
-collection's current index file again and any stale index files aren't made
-again. A missing stale index file only matters to a client still using a
-cached copy of an old `collections.json`. The index host controls how long
-`collections.json` is cached, so a missing stale index file shouldn't be an
-issue.
-
-Apart from `private/cache/`, the private directory can't be made again from
-the published files, as it holds state only the index has. Whether a version
-is yanked or deprecated is one example. Without the private directory, the
-index can be created again by adding each artifact, but the state the private
-directory held is lost.
+`generate-plugins` extracts every version's plugins from its artifact, and
+makes the plugin cache and `plugins.jsonl` from them. The tree can then be
+published as usual.
 
 ## Developing
 
-Building it needs `cargo` as well as [uv](https://docs.astral.sh/uv/), as
-alai-core is built from source until it's on PyPI.
+Working on alai-index needs [uv](https://docs.astral.sh/uv/), which
+installs everything else.
 
 ```console
 $ uv sync
 $ uv run tox run -f sanity
 $ uv run tox run -f py314
-```
-
-alai-core is pinned to a commit in `[project] dependencies`. When working on
-alai-core and alai-index at once, `[tool.uv.sources]` can point alai-core at
-a local checkout instead.
-
-```toml
-alai-core = { path = "../alai-core", editable = true }
 ```
 
 ## License

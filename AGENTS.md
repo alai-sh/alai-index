@@ -7,29 +7,36 @@
   needs to know is in the command's output.
 - Building and managing the index uses no network and no storage
   backends. The caller fetches what an operation reads into the tree, and
-  publishes what it writes. A file the tree should have and doesn't is an
-  error, never taken as empty, which would publish an index missing
-  versions.
+  publishes what it writes. An index file or listing the tree should have
+  and doesn't is an error, never taken as empty, which would publish an
+  index missing versions. A missing plugin cache file is made again
+  instead.
 - The network is only for reading an upstream server, as `galaxy-mirror`
   reads a Galaxy server's v3 API through `_galaxy`. One request at a time,
   retrying with backoff, and only the endpoints ansible-galaxy itself uses.
   A version is yanked only on a 404 from its own page or its collection's.
   There's no authentication yet. When there is, credentials go only to the
   server they're for.
-- The private directory (`private/` in the tree unless `--private` says
-  otherwise) holds the index's state, which with `config.json` and the
-  artifacts is the source of truth. Only what can't be derived goes in the
-  state. Every public file, and the private `cache/`, is derived and can
-  always be rebuilt. The cache exists because rebuilding it means
-  unpacking every artifact. The private directory isn't part of the index
-  format or the public interface, clients never read it, and its files can
-  change shape without a format version bump.
-- Private files are written before public ones, and a public index file
-  that doesn't match the private state is an error, never silently
-  trusted or rewritten.
+- `config.json`, `collections.json`, the index files and the artifacts are
+  the source of truth. An index line holds everything about a version, the
+  fields the index sets and the ones read from the artifact when it was
+  added, which are meant to stay as published. `collections.json` is the
+  record of each collection's current index file, so it's written by every
+  command that changes one. There's no other copy of
+  any of it, so nothing has to be migrated but the public format.
+- The plugin cache (`plugin-cache/` in the tree unless `--plugin-cache` says
+  otherwise) is the only thing kept besides the index. It's never published,
+  and exists because a collection's plugin lines need every version's
+  extraction. Each collection's file path is fixed, so callers can fetch it,
+  but its contents are alai-index's own. Each extraction is numbered
+  (`_plugins.CURRENT`). A missing or older one is made again when the
+  artifact is on disk, and listed in `outdated` when it isn't. A newer one
+  refuses the command. Losing the cache only costs extracting again.
+- An index file that's missing, or isn't the one `collections.json` names,
+  is an error, never taken as empty or rewritten.
 - An index line comes from the artifact itself, `MANIFEST.json` and
   `meta/runtime.yml`, never from an upstream's API.
-- Write order: artifacts and private files, then index files, then
+- Write order: artifacts and the plugin cache, then index files, then
   `plugins.jsonl`, then `collections.json`, so the index never names a
   file that isn't written yet. Every file is written whole.
 - Every check runs before anything is written, so a refused command leaves
