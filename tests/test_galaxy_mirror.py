@@ -73,6 +73,19 @@ def test_mirrors_new_versions(tmp_path: Path, root: Path, galaxy: MockGalaxy, cl
     ]
 
 
+def test_failed_extraction_is_in_the_result(
+    tmp_path: Path, root: Path, galaxy: MockGalaxy, client: GalaxyClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail(path: object) -> None:
+        raise ValueError("boom")
+
+    monkeypatch.setattr("alai_core.extract.extract", fail)
+    _publish(galaxy, tmp_path, "ns.coll", "1.0.0", "2026-01-01T00:00:00Z")
+
+    [change] = index.Index(root).galaxy_mirror(client, ["ns.coll"])
+    assert (change.result, (change.details or {}).get("error")) == ("added", "ValueError: boom")
+
+
 def test_nothing_to_do_asks_for_no_details(
     tmp_path: Path, root: Path, galaxy: MockGalaxy, client: GalaxyClient
 ) -> None:
@@ -115,10 +128,12 @@ def test_yanked_only_on_its_own_404(tmp_path: Path, root: Path, galaxy: MockGala
     ]
     assert [line["yanked"] for line in _lines(root / "index" / "ns" / "coll.jsonl")] == [True, False]
 
-    # Back, with the same artifact: unyanked.
+    # Back, with the same artifact: checked and unyanked.
     galaxy.collections["ns.coll"]["versions"]["1.0.0"] = entry
+    sha256 = _lines(root / "index" / "ns" / "coll.jsonl")[0]["sha256"]
     assert index.Index(root).galaxy_mirror(client, ["ns.coll"]) == [
-        index.Change("ns.coll", "1.0.0", "changed", {"yanked": False})
+        index.Change("ns.coll", "1.0.0", "unchanged", {"sha256": sha256, "published": "2026-01-01T00:00:00Z"}),
+        index.Change("ns.coll", "1.0.0", "changed", {"yanked": False}),
     ]
 
 
@@ -143,14 +158,70 @@ def test_conflict_is_never_written(tmp_path: Path, root: Path, galaxy: MockGalax
     # Not checked until something suggests it changed.
     assert index.Index(root).galaxy_mirror(client, ["ns.coll"]) == []
     changes = index.Index(root).galaxy_mirror(client, ["ns.coll"], revalidate=True)
-    assert changes == [
-        index.Change("ns.coll", "1.0.0", "conflict", {"sha256": "ab" * 32, "url": "/download/ns.coll--1.0.0.tar.gz"})
-    ]
+    details: dict[str, object] = {
+        "sha256": "ab" * 32,
+        "url": "/download/ns.coll--1.0.0.tar.gz",
+        "published": "2026-01-01T00:00:00Z",
+    }
+    assert changes == [index.Change("ns.coll", "1.0.0", "conflict", details)]
     assert (root / "index" / "ns" / "coll.jsonl").read_bytes() == before
 
     # A re-upload, its created_at moved, is checked without being asked.
     galaxy.collections["ns.coll"]["versions"]["1.0.0"]["created_at"] = "2026-05-01T00:00:00Z"
-    assert _results(index.Index(root).galaxy_mirror(client, ["ns.coll"])) == [("ns.coll", "1.0.0", "conflict")]
+    [change] = index.Index(root).galaxy_mirror(client, ["ns.coll"])
+    assert (change.result, (change.details or {})["published"]) == ("conflict", "2026-05-01T00:00:00Z")
+
+
+def test_checked_isnt_checked_again(tmp_path: Path, root: Path, galaxy: MockGalaxy, client: GalaxyClient) -> None:
+    _publish(galaxy, tmp_path, "ns.coll", "1.0.0", "2026-01-01T00:00:00Z")
+    index.Index(root).galaxy_mirror(client, ["ns.coll"])
+    version = galaxy.collections["ns.coll"]["versions"]["1.0.0"]
+    version["sha256"], version["created_at"] = "ab" * 32, "2026-05-01T00:00:00Z"
+    checked = tmp_path / "checked.json"
+
+    # Reported once, then left while the caller says it already checked that created_at.
+    [change] = index.Index(root).galaxy_mirror(client, ["ns.coll"])
+    assert change.result == "conflict"
+    checked.write_text(json.dumps({"ns.coll": {"1.0.0": "2026-05-01T00:00:00Z"}}))
+    galaxy.requests.clear()
+    assert index.Index(root).galaxy_mirror(client, ["ns.coll"], checked=checked) == []
+    assert not [r for r in galaxy.requests if r.endswith("/versions/1.0.0/")]
+
+    # Served as ours again, with its old created_at, which differs from the one checked.
+    sha256 = str(_lines(root / "index" / "ns" / "coll.jsonl")[0]["sha256"])
+    version["sha256"], version["created_at"] = sha256, "2026-01-01T00:00:00Z"
+    assert index.Index(root).galaxy_mirror(client, ["ns.coll"], checked=checked) == [
+        index.Change("ns.coll", "1.0.0", "unchanged", {"sha256": sha256, "published": "2026-01-01T00:00:00Z"})
+    ]
+
+
+@pytest.mark.parametrize("content", [None, "not json", "[]", '{"ns.coll": {"1.0.0": 1}}'])
+def test_checked_file_has_to_be_right(tmp_path: Path, root: Path, client: GalaxyClient, content: str | None) -> None:
+    checked = tmp_path / "checked.json"
+    if content is not None:
+        checked.write_text(content)
+    with pytest.raises(index.Error, match=r"checked\.json"):
+        index.Index(root).galaxy_mirror(client, ["ns.coll"], checked=checked)
+
+
+def test_lost_plugin_cache_is_made_again_from_artifacts_on_disk(
+    tmp_path: Path, root: Path, galaxy: MockGalaxy, client: GalaxyClient
+) -> None:
+    _publish(galaxy, tmp_path, "ns.coll", "1.0.0", "2026-01-01T00:00:00Z", modules={"a": module("A")})
+    index.Index(root).galaxy_mirror(client, ["ns.coll"])
+    (root / "plugin-cache" / "ns" / "coll.jsonl").unlink()
+
+    # Nothing changed on the server, but the collection was looked at, and its artifact is on disk.
+    assert _results(index.Index(root).galaxy_mirror(client, ["ns.coll"])) == [("ns.coll", "1.0.0", "extracted")]
+    assert [p["name"] for p in _lines(root / "plugins.jsonl")] == ["a"]
+
+    # Without its artifact, it's reported for the caller to fetch.
+    (root / "plugin-cache" / "ns" / "coll.jsonl").unlink()
+    for artifact in (root / "dl").rglob("*.tar.gz"):
+        artifact.unlink()
+    tree = index.Index(root)
+    assert tree.galaxy_mirror(client, ["ns.coll"]) == []
+    assert [(o["name"], o["version"], "index" in o) for o in tree.files["outdated"]] == [("ns.coll", "1.0.0", True)]
 
 
 def test_deprecation(tmp_path: Path, root: Path, galaxy: MockGalaxy, client: GalaxyClient) -> None:
@@ -251,7 +322,7 @@ def test_a_bad_index_is_refused_before_any_download(
     (root / "index" / "ns" / "b.jsonl").write_bytes(b"")
     galaxy.requests.clear()
 
-    with pytest.raises(index.Error, match=r"ns\.b's index file doesn't match its state"):
+    with pytest.raises(index.Error, match=r"for ns\.b, its sha256 differs"):
         index.Index(root).galaxy_mirror(client, ["ns.a", "ns.b"])
     assert galaxy.requests == []
     assert not (root / "index" / "ns" / "a.jsonl").exists()
@@ -264,17 +335,6 @@ def test_copied_as_published(tmp_path: Path, root: Path, galaxy: MockGalaxy, cli
     assert _results(tree.galaxy_mirror(client, ["ns.coll"])) == [("ns.coll", "1.0.0", "added")]
     assert _lines(root / "index" / "ns" / "coll.jsonl")[0]["deps"] == [{"name": "ns.missing", "req": "^1.0"}]
     assert tree.warnings
-
-
-def test_no_commit(tmp_path: Path, root: Path, galaxy: MockGalaxy, client: GalaxyClient) -> None:
-    _publish(galaxy, tmp_path, "ns.coll", "1.0.0", "2026-01-01T00:00:00Z", modules={"a": module("A")})
-    listing, plugin_index = (root / "collections.json").read_bytes(), (root / "plugins.jsonl").read_bytes()
-    tree = index.Index(root)
-
-    tree.galaxy_mirror(client, ["ns.coll"], commit=False)
-    assert (root / "collections.json").read_bytes() == listing
-    assert (root / "plugins.jsonl").read_bytes() == plugin_index
-    assert tree.files["collections"] == ["ns.coll"]
 
 
 def test_api_under_a_prefix(tmp_path: Path, root: Path) -> None:
@@ -339,7 +399,7 @@ def test_session_carries_on(tmp_path: Path, root: Path, galaxy: MockGalaxy, clie
     session = tmp_path / "session.json"
     tree = index.Index(root)
     tree.galaxy_mirror(client, ["ns.coll"], limit=1, session=session)
-    assert not [p for p in tree.files["written"]["private"] if "session" in p]  # Not part of the tree.
+    assert not [p for p in tree.files["written"]["plugin-cache"] if "session" in p]  # Not part of the tree.
     galaxy.requests.clear()
 
     # Only downloads: neither the collection's page nor its versions are asked for again.

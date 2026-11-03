@@ -1,7 +1,7 @@
 # Copyright: (c) 2026, Jordan Borean (@jborean93) <jborean93@gmail.com>
 # MIT License (see LICENSE or https://opensource.org/licenses/MIT)
 
-"""Collection tarballs for tests, laid out as ``ansible-galaxy collection build`` writes them."""
+"""Collection tarballs for tests, laid out as ``ansible-galaxy collection build`` writes them, and a helper for trees."""
 
 from __future__ import annotations
 
@@ -81,3 +81,11 @@ def build_collection(
             tar.addfile(info_f, io.BytesIO(data))
     path.write_bytes(buffer.getvalue())
     return path
+
+
+def relist(root: Path, name: str) -> None:
+    """Point collections.json at a collection's index file as a test changed it, as a mirror publishing it would."""
+    listing = json.loads((root / "collections.json").read_bytes())
+    ns, short = name.split(".")
+    listing["namespaces"][ns][short]["sha256"] = _sha256((root / "index" / ns / f"{short}.jsonl").read_bytes())
+    (root / "collections.json").write_text(json.dumps(listing))

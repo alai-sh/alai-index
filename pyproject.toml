@@ -23,9 +23,8 @@ classifiers = [
 
 dependencies = [
     "argcomplete >= 3.5.2",
-    # A commit of alai-core's repository until it's on PyPI, given here rather than in [tool.uv.sources] so installs
-    # from GitHub or the sdist find it too.
-    "alai-core @ git+https://github.com/alai-sh/alai-core@eb18167e081db4f6a6bde297c28b1216896b42b6",
+    # Releases before 0.1 can change their API in any release, so only 0.0.x patch releases.
+    "alai-core ~= 0.0.1",
 ]
 
 [project.scripts]

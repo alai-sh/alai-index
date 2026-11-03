@@ -48,7 +48,7 @@ def _config(args: argparse.Namespace) -> int:
 
     index.configure(
         args.root,
-        private=args.private,
+        plugin_cache=args.plugin_cache,
         dl=args.dl,
         index=args.index,
         dl_template=args.dl_template,
@@ -61,12 +61,11 @@ def _config(args: argparse.Namespace) -> int:
 def _open(args: argparse.Namespace) -> Index:
     from . import _index as index
 
-    return index.Index(args.root, private=args.private, dl=args.dl)
+    return index.Index(args.root, plugin_cache=args.plugin_cache, dl=args.dl)
 
 
 TEXT = {
     "added": "added {what}",
-    "exists": "{what} is already in the index",
     "changed": "updated {what}",
     "unchanged": "{what} is unchanged",
     "removed": "removed {what}",
@@ -121,7 +120,10 @@ def _text(change: Change) -> str:
     if change.result == "changed" and change.details:
         words = {("yanked", True): "yanked", ("yanked", False): "unyanked"}
         words |= {("deprecated", True): "deprecated", ("deprecated", False): "undeprecated"}
-        return " and ".join(words[k, bool(v)] for k, v in change.details.items()) + f" {what}"
+        if all(k in ("yanked", "deprecated") for k in change.details):
+            return " and ".join(words[k, bool(v)] for k, v in change.details.items()) + f" {what}"
+        # A line made again from its artifact, whose fields can be any.
+        return f"updated {', '.join(change.details)} of {what}"
     return TEXT[change.result].format(what=what)
 
 
@@ -139,7 +141,11 @@ def _finish(args: argparse.Namespace, tree: Index, results: list[Change], more: 
         ]
         print(json.dumps({"versions": versions, **tree.files}))
     else:
-        for line in [_text(c) for c in results] + list(more):
+        outdated = [
+            f"{o['name']} {o['version']}'s plugins are out of date, as its artifact isn't on disk to extract them again"
+            for o in tree.files["outdated"]
+        ]
+        for line in [_text(c) for c in results] + outdated + list(more):
             print(line)
     return 0
 
@@ -147,30 +153,31 @@ def _finish(args: argparse.Namespace, tree: Index, results: list[Change], more: 
 def _add(args: argparse.Namespace) -> int:
     tree = _open(args)
     skip = args.skip_checks or ()
-    return _finish(args, tree, tree.add(args.tarballs, published=args.published, skip=skip, commit=not args.no_commit))
+    return _finish(args, tree, tree.add(args.tarballs, published=args.published, skip=skip))
 
 
 def _set(args: argparse.Namespace) -> int:
     tree = _open(args)
-    results = tree.set(args.targets, yanked=args.yanked, deprecated=args.deprecated, commit=not args.no_commit)
+    results = tree.set(args.targets, yanked=args.yanked, deprecated=args.deprecated)
     return _finish(args, tree, results)
 
 
 def _remove(args: argparse.Namespace) -> int:
     tree = _open(args)
-    return _finish(args, tree, tree.remove(args.targets, commit=not args.no_commit))
+    return _finish(args, tree, tree.remove(args.targets))
 
 
-def _rebuild(args: argparse.Namespace) -> int:
+def _generate_indexes(args: argparse.Namespace) -> int:
     tree = _open(args)
-    results = tree.rebuild(
-        args.targets,
-        everything=args.all,
-        files=args.files,
-        from_artifacts=args.from_artifacts,
-        allow_changes=args.allow_changes,
-    )
-    written = [f"rebuilt {path}" for path in tree.files["written"]["index"]]
+    results = tree.generate_indexes(args.targets)
+    written = [f"wrote {path}" for path in tree.files["written"]["index"]]
+    return _finish(args, tree, results, written if results or written else ["nothing changed"])
+
+
+def _generate_plugins(args: argparse.Namespace) -> int:
+    tree = _open(args)
+    results = tree.generate_plugins(args.targets, from_plugin_cache=args.from_plugin_cache)
+    written = [f"wrote {path}" for path in tree.files["written"]["index"] if path != "collections.json"]
     return _finish(args, tree, results, written if results or written else ["nothing changed"])
 
 
@@ -186,8 +193,8 @@ def _galaxy_mirror(args: argparse.Namespace) -> int:
         everything=args.all,
         limit=args.limit,
         revalidate=args.revalidate,
-        commit=not args.no_commit,
         session=args.session,
+        checked=args.checked,
     )
     _finish(args, tree, results)
     return EXIT_ERROR if args.strict and any(c.result == "failed" for c in results) else 0
@@ -249,10 +256,10 @@ def _parser() -> argparse.ArgumentParser:
         "-v", "--verbose", action="count", default=0, help="say more on stderr, such as every request to a server"
     )
     common.add_argument(
-        "--private",
+        "--plugin-cache",
         metavar="DIR",
-        help="the directory of the index's own state, which is never published but must be kept, ROOT/private by "
-        + "default",
+        help="the directory of the plugin cache, which is never published and can always be made again from the "
+        + "artifacts, ROOT/plugin-cache by default",
     )
     common.add_argument(
         "--dl",
@@ -269,14 +276,6 @@ def _parser() -> argparse.ArgumentParser:
         help="how to print what changed, text by default. json gives the versions changed and every file written, "
         + "deleted or left stale, for a program publishing the index. Warnings go to stderr either way",
     )
-    no_commit = argparse.ArgumentParser(add_help=False)
-    no_commit.add_argument(
-        "--no-commit",
-        action="store_true",
-        help="leave plugins.jsonl and collections.json as they are, for 'alai-index rebuild' with the collections "
-        + "changed to write once after a batch of changes",
-    )
-
     config = commands.add_parser(
         "config",
         parents=[common],
@@ -311,7 +310,7 @@ def _parser() -> argparse.ArgumentParser:
 
     add = commands.add_parser(
         "add",
-        parents=[changes, no_commit],
+        parents=[changes],
         help="add collection artifacts",
         description="Add collection artifacts. Each version is read from its MANIFEST.json and meta/runtime.yml.",
     )
@@ -334,7 +333,7 @@ def _parser() -> argparse.ArgumentParser:
     target_help = "a collection, for every version of it, or one version as NS.NAME:VERSION"
     set_ = commands.add_parser(
         "set",
-        parents=[changes, no_commit],
+        parents=[changes],
         help="yank or deprecate versions",
         description="Change whether versions are yanked or deprecated, the only things about a version that can change.",
     )
@@ -349,7 +348,7 @@ def _parser() -> argparse.ArgumentParser:
 
     remove = commands.add_parser(
         "remove",
-        parents=[changes, no_commit],
+        parents=[changes],
         help="take versions down",
         description="Take versions down, deleting their lines and artifacts. It's refused if a version that stays, and "
         + "isn't yanked, would be left without a version it needs. Yank those first, or remove them too.",
@@ -357,44 +356,36 @@ def _parser() -> argparse.ArgumentParser:
     remove.add_argument("targets", nargs="+", metavar="NS.NAME[:VERSION]", help=target_help)
     remove.set_defaults(func=_remove)
 
-    rebuild = commands.add_parser(
-        "rebuild",
+    indexes = commands.add_parser(
+        "generate-indexes",
         parents=[changes],
-        help="make the public files again",
-        description="Make public files again, from what the index knows, or with --from-artifacts, from the "
-        + "artifacts. Without collections or --all, only collections.json and plugins.jsonl are made again.",
+        help="make index lines again from the artifacts",
+        description="Make index lines again from the artifacts, as add makes them, keeping each version's published, "
+        + "yanked and deprecated. It's for when alai-index reads artifacts differently than it did when a version was "
+        + "added. The artifacts must be on disk. Without collections, it's every collection.",
     )
-    rebuild.add_argument(
-        "targets",
-        nargs="*",
-        metavar="NS.NAME[:VERSION]",
-        help="a collection, for every version of it, or one version as NS.NAME:VERSION",
+    indexes.add_argument("targets", nargs="*", metavar="NS.NAME[:VERSION]", help=target_help)
+    indexes.set_defaults(func=_generate_indexes)
+
+    generate = commands.add_parser(
+        "generate-plugins",
+        parents=[changes],
+        help="extract plugins again and work plugins.jsonl out again",
+        description="Extract plugins again from the artifacts, and work plugins.jsonl out again. The artifacts must "
+        + "be on disk. Without collections, it's every collection, and plugins.jsonl is made from nothing.",
     )
-    rebuild.add_argument("--all", action="store_true", help="every collection, in place of naming them")
-    rebuild.add_argument(
-        "--files",
-        action="append",
-        choices=("index", "plugins"),
-        help="what to make again, index files and collections.json, or plugins.jsonl, both by default. Give it "
-        + "twice for both",
-    )
-    rebuild.add_argument(
-        "--from-artifacts",
+    generate.add_argument("targets", nargs="*", metavar="NS.NAME[:VERSION]", help=target_help)
+    generate.add_argument(
+        "--from-plugin-cache",
         action="store_true",
-        help="read each version's deps, requires_ansible and size, and extract its plugins, from its artifact, "
-        + "rather than from what the index knows",
+        help="work plugins.jsonl out from the plugin cache, so only an extraction that's missing or out of date needs "
+        + "its artifact. One whose artifact isn't on disk is listed as outdated",
     )
-    rebuild.add_argument(
-        "--allow-changes",
-        action="store_true",
-        help="with --from-artifacts, write deps, requires_ansible or size that differ from the index file's, which "
-        + "are meant to stay as they were published",
-    )
-    rebuild.set_defaults(func=_rebuild)
+    generate.set_defaults(func=_generate_plugins)
 
     mirror = commands.add_parser(
         "galaxy-mirror",
-        parents=[changes, no_commit],
+        parents=[changes],
         help="bring collections in line with a Galaxy server",
         description="Bring collections in line with a Galaxy server of your own, through the v3 API ansible-galaxy "
         + "uses, as Private Automation Hub, galaxy_ng and Artifactory serve it. Don't use it for galaxy.ansible.com, "
@@ -424,6 +415,13 @@ def _parser() -> argparse.ArgumentParser:
         metavar="FILE",
         help="carry on from FILE if it's there, and write to it what's needed to carry on a mirror --limit leaves part "
         + "done, so the next run only downloads. Give the same FILE to each run. Its contents are internal",
+    )
+    mirror.add_argument(
+        "--checked",
+        metavar="FILE",
+        help="a JSON file of the server's created_at already checked for versions whose created_at differs from "
+        + "published, so a version the server serves with another artifact isn't checked again on every run. It's "
+        + 'kept by the caller, as {"ns.name": {"version": "created_at"}}',
     )
     mirror.add_argument("--strict", action="store_true", help="exit 1 if any version failed")
     mirror.set_defaults(func=_galaxy_mirror)

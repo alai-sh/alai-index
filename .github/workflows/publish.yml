@@ -41,6 +41,7 @@ jobs:
           TAG: ${{ github.event.release.tag_name }}
         run: |
           for file in dist/*; do
+            echo "Verifying ci.yml built $file from $TAG"
             gh attestation verify "$file" \
               --repo "$GITHUB_REPOSITORY" \
               --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/ci.yml" \

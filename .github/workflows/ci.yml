@@ -5,8 +5,9 @@ on:
     branches:
       - main
     tags:
-      # A version tag also drafts its GitHub release, with the sdist and wheel. Publishing that draft publishes to PyPI
-      # (publish.yml). git tag -a v1.0.0 -m "v1.0.0" && git push origin v1.0.0
+      # Drafts the release, and publishing the draft publishes to PyPI (publish.yml).
+      # Tag the release with the version in pyproject.toml, as the build checks they match.
+      #   TAG="v$(grep -m1 '^version' pyproject.toml | cut -d '"' -f 2)" && git tag -a "$TAG" -m "$TAG" && git push origin "$TAG"
       - 'v*'
 
   pull_request:

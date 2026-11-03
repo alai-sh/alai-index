@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from collection_data import build_collection
+from collection_data import build_collection, relist
 
 from alai_index._cli import SHELLS, main
 
@@ -22,7 +22,7 @@ def test_config_and_add(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> N
     assert main(["add", "--root", root, tarball, "--published", "2026-11-01T00:00:00Z"]) == 0
     assert main(["add", tarball, "--root", root]) == 0
 
-    assert capsys.readouterr().out == "added ns.coll 1.0.0\nns.coll 1.0.0 is already in the index\n"
+    assert capsys.readouterr().out == "added ns.coll 1.0.0\nns.coll 1.0.0 is unchanged\n"
     assert '"published":"2026-11-01T00:00:00Z"' in (tmp_path / "index" / "index" / "ns" / "coll.jsonl").read_text()
 
 
@@ -81,35 +81,55 @@ def test_set_and_remove(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> N
     assert capsys.readouterr().out == ("yanked ns.coll 1.0.0\nns.coll 1.0.0 is unchanged\nremoved ns.coll 1.0.0\n")
 
 
-def test_rebuild(tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch) -> None:
+def test_generate_indexes(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    root = tmp_path / "index"
+    main(["config", "--root", str(root)])
+    tarball = build_collection(tmp_path / "a.tar.gz", dependencies={"ns.dep": ">=1.0"})
+    main(["add", "--root", str(root), "--skip-checks", "dependencies", str(tarball)])
+    path = root / "index" / "ns" / "coll.jsonl"
+    path.write_bytes(path.read_bytes().replace(b'">=1.0"', b'">=0.1"'))
+    relist(root, "ns.coll")
+    capsys.readouterr()
+
+    assert main(["generate-indexes", "--root", str(root)]) == 0
+    assert capsys.readouterr().out.splitlines() == [
+        "updated deps of ns.coll 1.0.0",
+        "wrote index/ns/coll.jsonl",
+        "wrote collections.json",
+    ]
+    assert main(["generate-indexes", "--root", str(root)]) == 0
+    assert capsys.readouterr().out == "nothing changed\n"
+
+
+def test_generate_plugins(tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch) -> None:
     root = str(tmp_path / "index")
     main(["config", "--root", root])
     main(["add", "--root", root, str(build_collection(tmp_path / "a.tar.gz"))])
     capsys.readouterr()
 
-    assert main(["rebuild", "--root", root]) == 0
+    assert main(["generate-plugins", "--root", root, "--from-plugin-cache"]) == 0
     assert capsys.readouterr().out == "nothing changed\n"
 
     def fail(path: object) -> None:
         raise ValueError("boom")
 
     monkeypatch.setattr("alai_core.extract.extract", fail)
-    assert main(["rebuild", "--root", root, "--all", "--files", "plugins", "--from-artifacts"]) == 0
+    assert main(["generate-plugins", "--root", root]) == 0
     captured = capsys.readouterr()
     assert captured.out == "re-extracted ns.coll 1.0.0\n"
     assert captured.err.splitlines() == [
-        "reading the artifact of ns.coll 1.0.0",
+        "extracting the plugins of ns.coll 1.0.0",
         "warning: extracting the plugins of ns.coll 1.0.0 failed, so the plugin index has none of them. ValueError: boom",
     ]
 
 
-def test_private(tmp_path: Path) -> None:
-    root, state = str(tmp_path / "index"), str(tmp_path / "state")
+def test_plugin_cache(tmp_path: Path) -> None:
+    root, cache = str(tmp_path / "index"), str(tmp_path / "cache")
 
-    assert main(["config", "--root", root, "--private", state]) == 0
-    assert main(["add", "--root", root, "--private", state, str(build_collection(tmp_path / "a.tar.gz"))]) == 0
-    assert (tmp_path / "state" / "collections.json").exists()
-    assert not (tmp_path / "index" / "private").exists()
+    assert main(["config", "--root", root, "--plugin-cache", cache]) == 0
+    assert main(["add", "--root", root, "--plugin-cache", cache, str(build_collection(tmp_path / "a.tar.gz"))]) == 0
+    assert (tmp_path / "cache" / "ns" / "coll.jsonl").exists()
+    assert not (tmp_path / "index" / "plugin-cache").exists()
 
 
 @pytest.mark.parametrize(

@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import typing as _t
 from pathlib import Path
 
 import pytest
@@ -34,15 +33,15 @@ def test_add(tmp_path: Path, root: str, capsys: pytest.CaptureFixture[str]) -> N
 
     assert _json(capsys, ["add", "--root", root, "--output-format", "json", str(tarball)]) == {
         "versions": [{"name": "ns.coll", "version": "1.0.0", "result": "added", "details": {"sha256": sha256}}],
-        "collections": ["ns.coll"],
         "written": {
             "dl": [],
             # The artifacts are a path in the index, so they're published with it, and first.
             "index": [f"dl/{sha256[:2]}/{sha256}.tar.gz", "index/ns/coll.jsonl", "plugins.jsonl", "collections.json"],
-            "private": ["cache/plugins/ns/coll.jsonl", "index/ns/coll.jsonl", "collections.json"],
+            "plugin-cache": ["ns/coll.jsonl"],
         },
-        "deleted": {"dl": [], "index": [], "private": []},
+        "deleted": {"dl": [], "index": [], "plugin-cache": []},
         "stale": [],
+        "outdated": [],
     }
 
 
@@ -68,7 +67,7 @@ def test_remove(tmp_path: Path, root: str, capsys: pytest.CaptureFixture[str]) -
     assert out["deleted"] == {
         "dl": [],
         "index": [f"dl/{sha256[:2]}/{sha256}.tar.gz", "index/ns/coll.jsonl"],
-        "private": ["index/ns/coll.jsonl", "cache/plugins/ns/coll.jsonl"],
+        "plugin-cache": ["ns/coll.jsonl"],
     }
 
 
@@ -82,45 +81,26 @@ def test_stale_index_files(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -
     assert out["stale"] == [f"index/{listed[:2]}/{listed}.jsonl"]
     assert Path(root, "index", listed[:2], f"{listed}.jsonl").exists()
 
+    # Unyanked, the first file is named again, so it's published again though it's still in the tree.
+    out = _json(capsys, ["set", "--root", root, "--output-format", "json", "ns.coll", "--no-yanked"])
+    assert out["written"]["index"] == [f"index/{listed[:2]}/{listed}.jsonl", "collections.json"]  # pyright: ignore[reportIndexIssue]
 
-def test_no_commit_then_rebuild(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    committed, batched = str(tmp_path / "committed"), str(tmp_path / "batched")
-    tarballs = [str(build_collection(tmp_path / "a.tar.gz")), str(build_collection(tmp_path / "b.tar.gz", "ns.b"))]
-    for root in (committed, batched):
-        main(["config", "--root", root])
-    # The same publish time for both, or index files written a second apart would differ.
-    published = ["--published", "2026-11-01T00:00:00Z"]
-    main(["add", "--root", committed, *published, *tarballs])
-    listing, plugin_index = Path(batched, "collections.json").read_bytes(), Path(batched, "plugins.jsonl").read_bytes()
 
-    out = _json(capsys, ["add", "--root", batched, *published, "--no-commit", "--output-format", "json", *tarballs])
-    assert "collections.json" not in out["written"]["index"]  # pyright: ignore[reportIndexIssue]
-    assert "plugins.jsonl" not in out["written"]["index"]  # pyright: ignore[reportIndexIssue]
-    assert Path(batched, "collections.json").read_bytes() == listing
-    assert Path(batched, "plugins.jsonl").read_bytes() == plugin_index
+def test_arguments_from_a_file(tmp_path: Path, root: str, capsys: pytest.CaptureFixture[str]) -> None:
+    tarballs = [
+        str(build_collection(tmp_path / "a.tar.gz", modules={"a": module("A")})),
+        str(build_collection(tmp_path / "b.tar.gz", "ns.b", modules={"b": module("B")})),
+    ]
+    main(["add", "--root", root, *tarballs])
+    Path(root, "plugins.jsonl").write_bytes(b"")
 
-    # Committed later, with the collections the output named, read from a file as a long list would be.
+    # A long list of collections, read from a file a line each.
     names = tmp_path / "changed.txt"
-    names.write_text("\n".join(out["collections"]) + "\n")  # pyright: ignore[reportCallIssue, reportArgumentType]
-    assert main(["rebuild", "--root", batched, f"@{names}"]) == 0
-    for name in ("collections.json", "plugins.jsonl"):
-        assert _content(Path(committed, name)) == _content(Path(batched, name))
-
-
-def _content(path: Path) -> object:
-    """A file's JSON, or each line's, without the times it was written at, which differ between the two."""
-    data = path.read_bytes()
-    return _without_times(
-        [json.loads(line) for line in data.splitlines()] if path.suffix == ".jsonl" else json.loads(data)
+    names.write_text("ns.coll\nns.b\n")
+    out = _json(
+        capsys, ["generate-plugins", "--root", root, "--from-plugin-cache", "--output-format", "json", f"@{names}"]
     )
-
-
-def _without_times(data: object) -> object:
-    if isinstance(data, dict):
-        return {k: _without_times(v) for k, v in _t.cast("dict[str, object]", data).items() if k != "updated"}
-    if isinstance(data, list):
-        return [_without_times(v) for v in _t.cast("list[object]", data)]
-    return data
+    assert out["written"]["index"] == ["plugins.jsonl"]  # pyright: ignore[reportIndexIssue]
 
 
 def test_warnings_go_to_stderr(tmp_path: Path, root: str, capsys: pytest.CaptureFixture[str]) -> None:
@@ -137,6 +117,28 @@ def test_warnings_go_to_stderr(tmp_path: Path, root: str, capsys: pytest.Capture
     ]
 
 
+def test_outdated(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    root, dl = str(tmp_path / "index"), str(tmp_path / "artifacts")
+    main(["config", "--root", root, "--dl", dl, "--dl-template", "https://dl.example/sha256/{sha256-checksum}.tar.gz"])
+    tarball = build_collection(tmp_path / "a.tar.gz")
+    sha256 = hashlib.sha256(tarball.read_bytes()).hexdigest()
+    main(["add", "--root", root, "--dl", dl, str(tarball)])
+    Path(root, "plugin-cache", "ns", "coll.jsonl").unlink()
+    Path(dl, "sha256", f"{sha256}.tar.gz").unlink()
+
+    out = _json(
+        capsys,
+        ["generate-plugins", "--root", root, "--dl", dl, "ns.coll", "--from-plugin-cache", "--output-format", "json"],
+    )
+    assert out["outdated"] == [{"name": "ns.coll", "version": "1.0.0", "dl": f"sha256/{sha256}.tar.gz"}]
+    capsys.readouterr()
+    assert main(["generate-plugins", "--root", root, "--dl", dl, "ns.coll", "--from-plugin-cache"]) == 0
+    assert capsys.readouterr().out.splitlines() == [
+        "ns.coll 1.0.0's plugins are out of date, as its artifact isn't on disk to extract them again",
+        "nothing changed",
+    ]
+
+
 def test_skippable_matches_the_index() -> None:
     assert _cli.SKIPPABLE_CHECKS == _index.SKIPPABLE_CHECKS
 
@@ -144,11 +146,15 @@ def test_skippable_matches_the_index() -> None:
 def test_nothing_changed(tmp_path: Path, root: str, capsys: pytest.CaptureFixture[str]) -> None:
     tarball = str(build_collection(tmp_path / "a.tar.gz"))
     main(["add", "--root", root, tarball])
-    empty: dict[str, list[str]] = {"dl": [], "index": [], "private": []}
-    nothing: dict[str, object] = {"collections": [], "written": empty, "deleted": empty, "stale": []}
+    empty: dict[str, list[str]] = {"dl": [], "index": [], "plugin-cache": []}
+    nothing: dict[str, object] = {"written": empty, "deleted": empty, "stale": [], "outdated": []}
 
-    assert _json(capsys, ["rebuild", "--root", root, "--all", "--output-format", "json"]) == {"versions": [], **nothing}
-    assert _json(capsys, ["add", "--root", root, "--output-format", "json", tarball])["collections"] == []
+    assert _json(capsys, ["generate-plugins", "--root", root, "--from-plugin-cache", "--output-format", "json"]) == {
+        "versions": [],
+        **nothing,
+    }
+    out = _json(capsys, ["add", "--root", root, "--output-format", "json", tarball])
+    assert out["written"] == empty
     out = _json(capsys, ["set", "--root", root, "--output-format", "json", "ns.coll", "--no-yanked"])
     unchanged: dict[str, object] = {"name": "ns.coll", "version": "1.0.0", "result": "unchanged", "details": {}}
     assert out == {"versions": [unchanged], **nothing}

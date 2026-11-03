@@ -28,8 +28,9 @@ def test_without_listing_or_plugins(tmp_path: Path) -> None:
     index.configure(tmp_path, listing=False, plugins=False)
 
     assert json.loads((tmp_path / "config.json").read_bytes())["formats"] == {"1": {"index": index.DEFAULT_INDEX}}
-    assert sorted(p.name for p in tmp_path.iterdir()) == ["config.json", "private"]
-    assert json.loads((tmp_path / "private" / "collections.json").read_bytes()) == {"v": 1, "namespaces": {}}
+    # collections.json is kept in the tree whatever config.json says, as it's the record of each collection's index file.
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["collections.json", "config.json"]
+    assert json.loads((tmp_path / "collections.json").read_bytes()) == {"v": 1, "namespaces": {}}
 
 
 def test_keeps_what_is_left_out(tmp_path: Path) -> None:
@@ -59,16 +60,16 @@ def test_cant_change_with_collections(tmp_path: Path, listing: bool) -> None:
 @pytest.mark.parametrize(
     "kwargs",
     [
-        {"index": "private/{namespace}/{name}.jsonl"},
-        {"index": "./private/x/{sha256-checksum}.jsonl"},
-        {"dl_template": "private/{sha256-checksum}.tar.gz"},
-        {"private": "dl"},
+        {"index": "plugin-cache/{namespace}/{name}.jsonl"},
+        {"index": "./plugin-cache/x/{sha256-checksum}.jsonl"},
+        {"dl_template": "plugin-cache/{sha256-checksum}.tar.gz"},
+        {"plugin_cache": "dl"},
     ],
 )
-def test_templates_cant_lead_into_private(tmp_path: Path, kwargs: dict[str, str]) -> None:
-    with pytest.raises(index.Error, match=r"can't be kept in .*, which holds the index's own state"):
-        if "private" in kwargs:
-            kwargs["private"] = str(tmp_path / kwargs["private"])
+def test_templates_cant_lead_into_the_plugin_cache(tmp_path: Path, kwargs: dict[str, str]) -> None:
+    with pytest.raises(index.Error, match=r"can't be kept in .*, which is the plugin cache"):
+        if "plugin_cache" in kwargs:
+            kwargs["plugin_cache"] = str(tmp_path / kwargs["plugin_cache"])
         index.configure(tmp_path, **kwargs)  # pyright: ignore[reportArgumentType]
 
 
@@ -113,15 +114,27 @@ def test_dl_outside_the_tree(tmp_path: Path, dl: str) -> None:
         index.configure(tmp_path / "index", dl_template=dl)
 
 
-def test_private_elsewhere(tmp_path: Path) -> None:
-    root, state = tmp_path / "index", tmp_path / "state"
-    index.configure(root, private=state)
-    index.Index(root, private=state).add([build_collection(tmp_path / "a.tar.gz")])
+def test_plugin_cache_elsewhere(tmp_path: Path) -> None:
+    root, cache = tmp_path / "index", tmp_path / "cache"
+    index.configure(root, plugin_cache=cache)
+    index.Index(root, plugin_cache=cache).add([build_collection(tmp_path / "a.tar.gz")])
 
-    assert not (root / "private").exists()
-    assert (state / "index" / "ns" / "coll.jsonl").exists()
-    with pytest.raises(index.Error, match="is missing, which every index has"):
-        index.Index(root).add([build_collection(tmp_path / "b.tar.gz", version="2.0.0")])
-    # The state is never made empty for an index that has collections, which the next add would take as all new.
+    assert not (root / "plugin-cache").exists()
+    assert (cache / "ns" / "coll.jsonl").exists()
+    # Given another, it's made again from the artifacts, as a cache can always be.
+    changes = index.Index(root).add([build_collection(tmp_path / "b.tar.gz", version="2.0.0")])
+    assert [(c.version, c.result) for c in changes] == [("2.0.0", "added"), ("1.0.0", "extracted")]
+    assert (root / "plugin-cache" / "ns" / "coll.jsonl").exists()
+
+
+def test_listing_is_never_made_empty(tmp_path: Path) -> None:
+    root = tmp_path / "index"
+    index.configure(root)
+    index.Index(root).add([build_collection(tmp_path / "a.tar.gz")])
+    (root / "collections.json").unlink()
+
+    # An index with collections is never given an empty listing, which the next add would take as all new.
     with pytest.raises(index.Error, match="is missing, which every index has"):
         index.configure(root)
+    with pytest.raises(index.Error, match="is missing, which every index has"):
+        index.Index(root).add([build_collection(tmp_path / "b.tar.gz", version="2.0.0")])
