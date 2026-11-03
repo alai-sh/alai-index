@@ -16,6 +16,7 @@ import logging
 import os
 import posixpath
 import re
+import shutil
 import tempfile
 import typing as _t
 import urllib.parse
@@ -732,8 +733,9 @@ class Index:
                         version = line.version.text
                         if (name, version) in wanted:
                             log.info("extracting the plugins of %s %s", name, version)
-                            dest = self._unpack(line, os.path.join(tmp, f"{i}-{n}"))
-                            added.setdefault(name, {})[version] = self._extracted(name, version, dest, results)
+                            added.setdefault(name, {})[version] = self._extract_from(
+                                line, os.path.join(tmp, f"{i}-{n}"), results
+                            )
             cache = self._plugin_cache(haves, tmp, results, added=added)
             # Every collection's lines can be worked out again from nothing, so a lost plugins.jsonl is no error.
             plugin_index = self._plugin_index() if targets else _read(self.file(self.config.plugins)) or b""
@@ -984,6 +986,8 @@ class Index:
             staged = self._stage(path, os.path.join(tmp, "stage"), published, SKIPPABLE_CHECKS)
         except Error as e:
             return _failed(name, version, "bad_artifact", str(e))
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
         if (staged.line.name, staged.line.version.text) != (name, version):
             what = f"{staged.line.name} {staged.line.version.text}"
             return _failed(name, version, "manifest_mismatch", f"its MANIFEST.json is for {what}")
@@ -1040,6 +1044,14 @@ class Index:
         except artifact.ExtractError as e:
             return e
         return dest
+
+    def _extract_from(self, line: CollectionVersion, tmp: str, results: list[Change]) -> dict[str, object]:
+        """A version's extraction from its artifact, unpacked into ``tmp`` and deleted again straight after, so a
+        command over many versions never holds more than one unpacked artifact."""
+        try:
+            return self._extracted(line.name, line.version.text, self._unpack(line, tmp), results)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
     def _extracted(
         self, name: str, version: str, dest: str | artifact.ExtractError, results: list[Change]
@@ -1118,8 +1130,7 @@ class Index:
                 path = self.artifact_file(line)
                 if os.path.exists(path):
                     log.info("extracting the plugins of %s %s again", name, version)
-                    dest = self._unpack(line, os.path.join(tmp, f"cache-{i}-{n}"))
-                    found[version] = self._extracted(name, version, dest, results)
+                    found[version] = self._extract_from(line, os.path.join(tmp, f"cache-{i}-{n}"), results)
                     continue
                 group, rel = self._relative("artifact", path)
                 self.files["outdated"].append({"name": name, "version": version, group: rel})
@@ -1130,7 +1141,16 @@ class Index:
         return cached
 
     def _stage(self, path: str, tmp: str, published: str, skip: _c.Collection[str], *, extract: bool = True) -> _Staged:
-        """Read and check an artifact, and make its line, and its extraction unless ``extract`` is False."""
+        """Read and check an artifact, and make its line, and its extraction unless ``extract`` is False. It's unpacked
+        into ``tmp``, which is deleted again before returning."""
+        try:
+            return self._stage_unpacked(path, tmp, published, skip, extract=extract)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def _stage_unpacked(
+        self, path: str, tmp: str, published: str, skip: _c.Collection[str], *, extract: bool
+    ) -> _Staged:
         data = _read(path)
         if data is None:
             raise Error(f"{path} doesn't exist")
