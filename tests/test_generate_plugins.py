@@ -11,6 +11,7 @@ import pytest
 from collection_data import build_collection, module
 
 from alai_index import _index as index
+from alai_index import _plugins as plugins
 
 
 def _lines(path: Path) -> list[dict[str, object]]:
@@ -133,6 +134,25 @@ def test_lost_extractions(tmp_path: Path, root: Path) -> None:
 def test_one_version(root: Path) -> None:
     # Extracted again whatever the cache says.
     assert index.Index(root).generate_plugins(["ns.coll:2.0.0"]) == [index.Change("ns.coll", "2.0.0", "extracted")]
+
+
+def test_one_unpacked_artifact_at_a_time(tmp_path: Path, root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A collection can have thousands of versions, each unpacked, so each is deleted again before the next.
+    extraction = plugins.extraction
+    seen: list[int] = []
+
+    def counting(path: str, version: str) -> dict[str, object]:
+        seen.append(len(list(Path(path).parents[1].iterdir())))
+        return extraction(path, version)
+
+    monkeypatch.setattr(plugins, "extraction", counting)
+    index.Index(root).generate_plugins()
+    shutil.rmtree(root / "plugin-cache")
+    index.Index(root).generate_plugins(from_plugin_cache=True)
+    index.Index(root).add(
+        [build_collection(tmp_path / f"{v}.tar.gz", "ns.new", v) for v in ("1.0.0", "2.0.0", "3.0.0")]
+    )
+    assert seen == [1] * 9
 
 
 def test_extraction_still_fails(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
