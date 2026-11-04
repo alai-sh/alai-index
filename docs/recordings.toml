@@ -1,0 +1,149 @@
+# The terminal recordings in the docs, made by python -m cli_recorder record on
+# every docs build. The keys of a [[recording]] are in cli-recorder's
+# README.
+#
+# Two keys are alai-index's own, read by docs/recordings.py:
+#
+#   tarballs     collections' tarballs built into the recording's directory
+#                first, each { name, version, dependencies, requires_ansible,
+#                modules }, named as ansible-galaxy names them, such as
+#                corp-tools-1.0.0.tar.gz
+#   [[galaxy]]   versions a local Galaxy server serves, each as a tarball,
+#                with an optional created_at. Its URL is $GALAXY_SERVER
+
+[[galaxy]]
+name = "corp.base"
+version = "1.2.0"
+created_at = "2026-03-02T09:00:00Z"
+modules = { facts = "Gather facts about the host" }
+
+[[galaxy]]
+name = "corp.tools"
+version = "1.0.0"
+created_at = "2026-04-10T14:30:00Z"
+dependencies = { "corp.base" = ">=1.0.0" }
+modules = { ping = "Check the host answers" }
+
+[[galaxy]]
+name = "corp.tools"
+version = "1.1.0"
+created_at = "2026-05-21T11:15:00Z"
+dependencies = { "corp.base" = ">=1.2.0" }
+modules = { ping = "Check the host answers", restart = "Restart a service" }
+
+[[recording]]
+name = "config"
+title = "Starting an index"
+commands = [
+    "alai-index config --root my-index",
+    "cat my-index/config.json",
+]
+
+[[recording]]
+name = "add"
+title = "Adding collections"
+setup = ["alai-index config --root my-index"]
+tarballs = [
+    { name = "corp.base", version = "1.2.0", modules = { facts = "Gather facts about the host" } },
+    { name = "corp.tools", version = "1.0.0", dependencies = { "corp.base" = ">=1.0.0" }, modules = { ping = "Check the host answers" } },
+]
+commands = [
+    "ls",
+    "alai-index add --root my-index corp-base-1.2.0.tar.gz corp-tools-1.0.0.tar.gz",
+    "cat my-index/index/corp/tools.jsonl",
+]
+
+[[recording]]
+name = "set"
+title = "Yanking a version"
+setup = [
+    "alai-index config --root my-index",
+    "alai-index add --root my-index --quiet corp-base-1.2.0.tar.gz corp-tools-1.0.0.tar.gz",
+]
+tarballs = [
+    { name = "corp.base", version = "1.2.0" },
+    { name = "corp.tools", version = "1.0.0", dependencies = { "corp.base" = ">=1.0.0" } },
+]
+commands = [
+    "alai-index set --root my-index corp.tools:1.0.0 --yanked",
+    "alai-index set --root my-index corp.tools --deprecated",
+]
+
+[[recording]]
+name = "remove"
+title = "Removing versions"
+setup = [
+    "alai-index config --root my-index",
+    "alai-index add --root my-index --quiet corp-base-1.2.0.tar.gz corp-tools-1.0.0.tar.gz",
+]
+tarballs = [
+    { name = "corp.base", version = "1.2.0" },
+    { name = "corp.tools", version = "1.0.0", dependencies = { "corp.base" = ">=1.0.0" } },
+]
+commands = [
+    "alai-index remove --root my-index corp.base",
+    "alai-index remove --root my-index corp.tools corp.base",
+]
+
+[[recording]]
+name = "generate-plugins"
+title = "Making plugins.jsonl again from the plugin cache"
+setup = [
+    "alai-index config --root my-index",
+    "alai-index add --root my-index --quiet corp-base-1.2.0.tar.gz corp-tools-1.0.0.tar.gz",
+    "rm my-index/plugins.jsonl",
+]
+tarballs = [
+    { name = "corp.base", version = "1.2.0", modules = { facts = "Gather facts about the host" } },
+    { name = "corp.tools", version = "1.0.0", dependencies = { "corp.base" = ">=1.0.0" }, modules = { ping = "Check the host answers" } },
+]
+commands = [
+    "alai-index generate-plugins --root my-index --from-plugin-cache",
+    "cat my-index/plugins.jsonl",
+]
+
+[[recording]]
+name = "galaxy-mirror"
+title = "Mirroring a Galaxy server"
+setup = ["alai-index config --root my-index"]
+commands = [
+    "alai-index galaxy-mirror --root my-index $GALAXY_SERVER corp.base corp.tools",
+    "alai-index galaxy-mirror --root my-index $GALAXY_SERVER corp.base corp.tools",
+]
+
+[[recording]]
+name = "json"
+title = "Output for a program"
+setup = ["alai-index config --root my-index"]
+tarballs = [
+    { name = "corp.base", version = "1.2.0", modules = { facts = "Gather facts about the host" } },
+]
+commands = [
+    "alai-index add --root my-index --quiet --output-format json corp-base-1.2.0.tar.gz | python -m json.tool",
+]
+
+[[reference."config"]]
+recording = "config"
+
+[[reference."add"]]
+recording = "add"
+
+[[reference."set"]]
+recording = "set"
+
+[[reference."remove"]]
+recording = "remove"
+description = """
+A version that isn't yanked can't be left without a version it needs, so
+removing corp.base alone is refused. Removing both together works.
+"""
+
+[[reference."generate-plugins"]]
+recording = "generate-plugins"
+
+[[reference."galaxy-mirror"]]
+recording = "galaxy-mirror"
+description = """
+GALAXY_SERVER holds the URL of a local Galaxy server. The second run finds
+nothing new to add.
+"""

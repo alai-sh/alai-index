@@ -31,6 +31,7 @@ dependencies = [
 alai-index = "alai_index._cli:main"
 
 [project.urls]
+Documentation = "https://alai.sh/alai-index/"
 Source = "https://github.com/alai-sh/alai-index"
 Issues = "https://github.com/alai-sh/alai-index/issues"
 
@@ -47,6 +48,31 @@ dev = [
     "pre-commit",
     "tox-uv",
 ]
+docs = [
+    # The docs build runs on 3.15, as tox's docs env says. The marker lets uv still lock this group for 3.10.
+    "cli-recorder ; python_version >= '3.15'",
+    "zensical >= 0.0.71; python_version >= '3.15'",
+]
+
+[tool.cli-recorder]
+# The docs' terminal recordings and CLI reference, see docs/recordings.toml.
+program = "alai-index"
+parser = "alai_index._cli:_parser"
+fixture = "docs/recordings.py"
+header = """\
+---
+description: Every alai-index command and the options it takes.
+---
+
+<!-- Written by python -m cli_recorder reference from alai-index's argument parser. Edit the help there, not here. -->
+
+# CLI reference
+
+Every alai-index command, with what it does and the options it takes, as
+`alai-index <command> --help` shows them. The recordings were made when
+these docs were built, so their output is alai-index's own, though the
+collections are only examples.
+"""
 
 [tool.uv]
 # Reinstall on any source change, not only on pyproject.toml.
@@ -55,8 +81,12 @@ cache-keys = [
     { file = "src/**/*.py" },
 ]
 
+[tool.uv.sources]
+# uv.lock pins it to a commit, and uv lock --upgrade-package cli-recorder moves it.
+cli-recorder = { git = "https://github.com/alai-sh/cli-recorder" }
+
 [tool.basedpyright]
-include = ["src", "tests"]
+include = ["src", "tests", "docs"]
 pythonVersion = "3.10"
 reportAny = false
 # typing.override needs 3.12.
@@ -71,6 +101,8 @@ reportUnusedCallResult = false
 executionEnvironments = [
     # pytest fixtures are parameters a test may not use.
     { root = "tests", reportUntypedFunctionDecorator = false, reportUnusedParameter = false },
+    # The recordings' fixture imports the tests' helpers, adding tests/ to sys.path itself.
+    { root = "docs", extraPaths = ["tests"] },
 ]
 
 [tool.ruff]
@@ -184,4 +216,16 @@ commands_post =
 
 [testenv:sanity]
 base_python = py315
+
+[testenv:docs]
+# Checks the CLI reference matches the parser and records the terminal recordings, builds the docs strictly, then
+# checks every link between them, anchors included, which the build doesn't.
+base_python = py315
+dependency_groups = docs
+commands =
+    python -m cli_recorder assets docs/assets/cli-recorder
+    python -m cli_recorder reference --check
+    python -m cli_recorder record
+    zensical build --strict
+    python -m cli_recorder check-links
 """
