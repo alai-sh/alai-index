@@ -1,0 +1,56 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            // Copies the player into docs/assets/cli-recorder/, writes the CLI reference (docs/cli.md) from
+            // alai-index's parser and records the terminal recordings into docs/casts/. Only docs/cli.md is in git.
+            // "docs: serve" runs it first. Run it again after changing a command's help or docs/recordings.toml,
+            // and the server picks the changes up.
+            "label": "docs: generate",
+            "type": "shell",
+            "command": "uv run --group docs python -m cli_recorder assets docs/assets/cli-recorder && uv run --group docs python -m cli_recorder reference && uv run --group docs python -m cli_recorder record",
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "silent",
+                "panel": "dedicated"
+            }
+        },
+        {
+            // Serves docs/ on port 24817 and rebuilds on save. alai's docs use 24816, so both can be served at once.
+            // Over Remote-SSH, VS Code forwards the port and offers to open it. Binding 127.0.0.1 explicitly keeps it
+            // to one port, as "localhost" listens on IPv4 and IPv6 separately. The port is fixed because a new one
+            // each run leaves a growing list of stale entries in VS Code's Ports view. If 24817 is taken, run the
+            // command by hand with another port.
+            //
+            // To open it in VS Code's integrated browser automatically, add this to your own user settings.json
+            // (Preferences: Open User Settings (JSON)) rather than this repo's.
+            //
+            //   "remote.portsAttributes": {
+            //       "24817": {
+            //           "label": "alai-index docs",
+            //           "onAutoForward": "openPreview"
+            //       }
+            //   }
+            "label": "docs: serve",
+            "type": "shell",
+            "command": "uv run --only-group docs zensical serve --dev-addr 127.0.0.1:24817",
+            "dependsOn": "docs: generate",
+            "isBackground": true,
+            "problemMatcher": {
+                "owner": "zensical",
+                "pattern": {
+                    "regexp": "^(?:\\u001b\\[[0-9;]*m)?Warning:(?:\\u001b\\[[0-9;]*m)? (.*)$",
+                    "message": 1
+                },
+                "background": {
+                    "beginsPattern": "^(Serving|Build started)",
+                    "endsPattern": "^(No issues found|Build finished)"
+                }
+            },
+            "presentation": {
+                "reveal": "silent",
+                "panel": "dedicated"
+            }
+        }
+    ]
+}

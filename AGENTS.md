@@ -49,8 +49,11 @@
   so it has no version field. If a key ever has to be removed or change
   meaning, add a top-level `v` first, with a missing `v` read as 1, so
   callers can tell the two apart.
-- What users read is US English, the CLI's help and output and
-  `README.md`, without `;` or `:` in the text.
+- What users read is US English, the CLI's help and output, `README.md`
+  and `docs/`, without `;` or `:` in the text.
+- The docs are published at alai.sh/alai-index. `docs/cli.md` is written
+  from the parser by `python -m cli_recorder reference`, so edit the help
+  instead. The recordings are in `docs/recordings.toml`.
 - How what users read is written:
   - Start with the situation the reader is in, then what happens or what to
     do. Describe an option by the problem it solves, such as "When syncing
@@ -77,4 +80,5 @@
 - Nothing is released, so no compatibility shims. Rename and replace
   outright.
 - Checks are `uv run tox run -f sanity` and `uv run tox run -f py314` (any
-  of `py310` to `py315`, `py314t`, `py315t`).
+  of `py310` to `py315`, `py314t`, `py315t`). The docs build is
+  `uv run tox run -e docs`.

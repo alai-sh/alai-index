@@ -1,0 +1,76 @@
+name: Alai Index Docs
+
+on:
+  push:
+    branches:
+      - main
+    # Everything but what can't change the docs. The CLI reference and its recordings come from src/, docs/ and the
+    # helpers in tests/, so a list of what to include would miss whatever they come to use. The last
+    # pattern to match a path wins.
+    paths: &docs-paths
+      - "**"
+      - "!.github/**"
+      - .github/workflows/docs.yml
+      - "!.vscode/**"
+      - "!.gitignore"
+      - "!.pre-commit-config.yaml"
+      - "!AGENTS.md"
+      - "!CHANGELOG.md"
+      - "!LICENSE"
+      - "!README.md"
+
+  pull_request:
+    branches:
+      - main
+    paths: *docs-paths
+
+permissions:
+  contents: read
+
+env:
+  UV_VERSION: "0.13.6"  # Keep in sync with ci.yml
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Its own cache, as ci.yml's jobs name theirs: caches are the repository's, so it would share a key with them.
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: ${{ env.UV_VERSION }}
+          cache-suffix: docs
+
+      # tox and the tools only, as tox builds alai-index itself.
+      - name: Build the docs and check their links
+        run: |
+          uv sync --no-install-project
+          uv run --no-sync tox run -e docs
+
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        if: github.event_name == 'push'
+        with:
+          path: site/
+
+  deploy:
+    name: Deploy
+    needs: build
+    if: github.event_name == 'push'
+    runs-on: ubuntu-26.04
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    permissions:
+      pages: write
+      id-token: write
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

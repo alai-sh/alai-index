@@ -5,3 +5,9 @@ __pycache__/
 coverage.xml
 .tox/
 scratch/
+site/
+.cache/
+
+# Made on every docs build by python -m cli_recorder.
+docs/casts/
+docs/assets/cli-recorder/
