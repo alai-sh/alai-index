@@ -27,7 +27,7 @@ so the index has no listing.
       "index": "index/{namespace}/{name}.jsonl"
     }
   },
-  "dl": "https://index.host/sha256/{sha256-prefix}/{sha256-checksum}.tar.gz",
+  "dl": "https://index.host/sha256/{sha256-prefix}/{sha256-checksum}",
   "moved-to": null
 }
 ```

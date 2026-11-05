@@ -23,8 +23,8 @@ classifiers = [
 
 dependencies = [
     "argcomplete >= 3.5.2",
-    # Releases before 0.1 can change their API in any release, so only 0.0.x patch releases.
-    "alai-core ~= 0.0.1",
+    # Releases before 1.0 can change their API in any minor release, so only 0.1.x patch releases.
+    "alai-core ~= 0.1.0",
 ]
 
 [project.scripts]

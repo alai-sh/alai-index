@@ -44,7 +44,7 @@ on another host.
     or index/<aa>/<sha256>.jsonl     or by SHA-256, as config.json says
 
 <artifacts>                          such as https://dl.alai.sh/
-  sha256/<aa>/<sha256>.tar.gz        collection tarballs, as config.json says
+  sha256/<aa>/<sha256>               collection artifacts, as config.json says
 ```
 
 To resolve a collection, a client does the following.
@@ -121,7 +121,7 @@ fixed, so its schema only ever gains fields.
       "plugins": "plugins.jsonl"
     }
   },
-  "dl": "https://dl.alai.sh/sha256/{sha256-prefix}/{sha256-checksum}.tar.gz",
+  "dl": "https://dl.alai.sh/sha256/{sha256-prefix}/{sha256-checksum}",
   "moved-to": null
 }
 ```
@@ -485,11 +485,17 @@ A template with `{sha256-checksum}` gives each artifact a URL that never
 changes, which stops a cache serving old bytes for a version that's removed
 and published again. Writers SHOULD use it.
 
-Artifacts are the tarballs exactly as they were published, and are never
-repackaged. Clients MUST check the SHA-256 of every artifact against the
-line's `sha256`, wherever it came from, and MUST refuse one that doesn't
-match. Clients SHOULD also check the artifact's `size`, and stop a download
-that goes past it.
+Artifacts are the tar archives exactly as they were published, and are never
+repackaged. An artifact can be compressed or not, and the index doesn't say
+how. Clients MUST tell an artifact's compression from its bytes rather than
+its URL, and MUST refuse an artifact whose compression they can't read. The
+URL is only a name, so the index chooses whether it ends in an extension
+such as `.tar.gz`, and clients don't read anything from it.
+
+Clients MUST check the SHA-256 of every artifact against the line's
+`sha256`, wherever it came from, and MUST refuse one that doesn't match.
+Clients SHOULD also check the artifact's `size`, and stop a download that
+goes past it.
 
 ### Trust
 

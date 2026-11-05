@@ -22,9 +22,9 @@ my-index/
 │       └── name.jsonl            one line per version
 ├── dl/
 │   ├── 15/
-│   │   └── 1531a523….tar.gz      artifacts, by sha256
+│   │   └── 1531a523…             artifacts, by sha256
 │   └── ab/
-│       └── ab401fdd….tar.gz
+│       └── ab401fdd…
 └── plugin-cache/                 never published, made from the artifacts
     └── ns/
         └── name.jsonl            each version's plugin extraction
@@ -95,8 +95,8 @@ without changing the other.
 
 | `dl` template | Artifacts on disk |
 |---|---|
-| A path in the index such as `dl/{sha256-prefix}/{sha256-checksum}.tar.gz`, which is the default | Clients resolve the path against the index root, so the artifacts are kept at that path and published with the index. `--dl` must be the directory that path is in. When `--dl-template` isn't given, `config` makes the template from `--dl` |
-| A URL on another host, such as `https://dl.example/sha256/{sha256-prefix}/{sha256-checksum}.tar.gz` | At the URL's path in the `--dl` directory, such as `DIR/sha256/ab/ab40….tar.gz`. The directory stands for that host's root, so publish it to the host as it is |
+| A path in the index such as `dl/{sha256-prefix}/{sha256-checksum}`, which is the default | Clients resolve the path against the index root, so the artifacts are kept at that path and published with the index. `--dl` must be the directory that path is in. When `--dl-template` isn't given, `config` makes the template from `--dl` |
+| A URL on another host, such as `https://dl.example/sha256/{sha256-prefix}/{sha256-checksum}` | At the URL's path in the `--dl` directory, such as `DIR/sha256/ab/ab40…`. The directory stands for that host's root, so publish it to the host as it is |
 
 When `--dl` is outside the index, `--dl-template` must be given, as clients
 can only find artifacts by a path in the index when the artifacts are inside

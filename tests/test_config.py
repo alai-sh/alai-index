@@ -42,7 +42,7 @@ def test_keeps_what_is_left_out(tmp_path: Path) -> None:
 
 
 def test_hashed_needs_listing(tmp_path: Path) -> None:
-    with pytest.raises(index.Error, match="only a 'collections' listing gives"):
+    with pytest.raises(index.Error, match="needs a 'collections' listing"):
         index.configure(tmp_path, index="index/{sha256-prefix}/{sha256-checksum}.jsonl", listing=False)
     assert not (tmp_path / "config.json").exists()
 
@@ -85,7 +85,7 @@ def test_dl_template_needs_the_checksum(tmp_path: Path, dl_template: str) -> Non
 def test_dl_template_from_the_dl_directory(tmp_path: Path) -> None:
     config = index.configure(tmp_path, dl=tmp_path / "artifacts" / "v1")
 
-    assert config.dl == "artifacts/v1/{sha256-prefix}/{sha256-checksum}.tar.gz"
+    assert config.dl == "artifacts/v1/{sha256-prefix}/{sha256-checksum}"
 
 
 def test_dl_directory_outside_the_index_needs_a_template(tmp_path: Path) -> None:

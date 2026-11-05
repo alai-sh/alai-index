@@ -150,7 +150,7 @@ def test_generate_indexes_by_sha256(tmp_path: Path) -> None:
 
 
 def test_generate_indexes_needs_the_artifacts(root: Path) -> None:
-    for artifact in (root / "dl").rglob("*.tar.gz"):
+    for artifact in (root / "dl").glob("*/*"):
         artifact.unlink()
     before = (root / "collections.json").read_bytes()
 
@@ -178,7 +178,7 @@ def test_remove_version(root: Path) -> None:
     ]
 
     assert [line["vers"] for line in _lines(root / "index" / "ns" / "coll.jsonl")] == ["2.0.0"]
-    assert not (root / "dl" / artifact[:2] / f"{artifact}.tar.gz").exists()
+    assert not (root / "dl" / artifact[:2] / artifact).exists()
     assert [line["version"] for line in _lines(root / "plugin-cache" / "ns" / "coll.jsonl")] == ["2.0.0"]
     assert [(p["name"], p["since"]) for p in _lines(root / "plugins.jsonl")] == [("new", "2.0.0")]
 
@@ -189,7 +189,7 @@ def test_remove_collection(root: Path) -> None:
     assert set(_listing(root)["ns"]) == {"coll"}
     assert not (root / "index" / "ns" / "dep.jsonl").exists()
     assert not (root / "plugin-cache" / "ns" / "dep.jsonl").exists()
-    assert len(list((root / "dl").rglob("*.tar.gz"))) == 2
+    assert len(list((root / "dl").glob("*/*"))) == 2
 
 
 def test_remove_refused_for_dependents(root: Path) -> None:
@@ -200,7 +200,7 @@ def test_remove_refused_for_dependents(root: Path) -> None:
     ):
         index.Index(root).remove(["ns.coll:2.0.0"])
     assert (root / "collections.json").read_bytes() == before
-    assert len(list((root / "dl").rglob("*.tar.gz"))) == 3
+    assert len(list((root / "dl").glob("*/*"))) == 3
 
 
 def test_remove_after_yanking_dependents(root: Path) -> None:

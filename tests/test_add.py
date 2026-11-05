@@ -3,8 +3,10 @@
 
 from __future__ import annotations
 
+import gzip
 import hashlib
 import json
+import lzma
 from pathlib import Path
 
 import pytest
@@ -52,7 +54,7 @@ def test_add(tmp_path: Path, root: Path) -> None:
         index.Change("ns.coll", "1.0.0", "added", {"sha256": sha256}),
         index.Change("ns.dep", "1.0.0", "added", {"sha256": _sha256(dep)}),
     ]
-    assert (root / "dl" / sha256[:2] / f"{sha256}.tar.gz").read_bytes() == tarball.read_bytes()
+    assert (root / "dl" / sha256[:2] / sha256).read_bytes() == tarball.read_bytes()
     assert _lines(root / "index" / "ns" / "coll.jsonl") == [
         {
             "v": 1,
@@ -162,6 +164,29 @@ def test_invalid_tarball(tmp_path: Path, root: Path) -> None:
     assert not (root / "dl").exists()
 
 
+@pytest.mark.parametrize("compression", ["none", "zstd"])
+def test_other_compression(tmp_path: Path, root: Path, compression: str) -> None:
+    tar = gzip.decompress(build_collection(tmp_path / "a.tar.gz").read_bytes())
+    if compression == "zstd":
+        zstd = pytest.importorskip("compression.zstd")
+        tar = zstd.compress(tar)
+    tarball = tmp_path / "a"
+    tarball.write_bytes(tar)
+
+    index.Index(root).add([tarball])
+
+    assert (root / "dl" / _sha256(tarball)[:2] / _sha256(tarball)).read_bytes() == tar
+
+
+def test_unsupported_compression(tmp_path: Path, root: Path) -> None:
+    tarball = tmp_path / "a.tar.xz"
+    tarball.write_bytes(lzma.compress(gzip.decompress(build_collection(tmp_path / "a.tar.gz").read_bytes())))
+
+    with pytest.raises(index.Error, match="xz"):
+        index.Index(root).add([tarball])
+    assert not (root / "dl").exists()
+
+
 def test_missing_tarball(tmp_path: Path, root: Path) -> None:
     with pytest.raises(index.Error, match="doesn't exist"):
         index.Index(root).add([tmp_path / "missing.tar.gz"])
@@ -217,14 +242,12 @@ def test_lost_extraction_without_its_artifact(tmp_path: Path, root: Path) -> Non
     before = (root / "plugins.jsonl").read_bytes()
     _cache(root).unlink()
     sha256 = _sha256(first)
-    (root / "dl" / sha256[:2] / f"{sha256}.tar.gz").unlink()
+    (root / "dl" / sha256[:2] / sha256).unlink()
 
     # Reported, and the collection keeps the plugin lines it has until its plugins can be extracted again.
     tree = index.Index(root)
     tree.add([build_collection(tmp_path / "b.tar.gz", version="2.0.0", modules={"b": module("B")})])
-    assert tree.files["outdated"] == [
-        {"name": "ns.coll", "version": "1.0.0", "index": f"dl/{sha256[:2]}/{sha256}.tar.gz"}
-    ]
+    assert tree.files["outdated"] == [{"name": "ns.coll", "version": "1.0.0", "index": f"dl/{sha256[:2]}/{sha256}"}]
     assert (root / "plugins.jsonl").read_bytes() == before
     assert [line["version"] for line in _lines(_cache(root))] == ["2.0.0"]
 
@@ -244,7 +267,7 @@ def test_older_extraction(tmp_path: Path, root: Path, monkeypatch: pytest.Monkey
     monkeypatch.setattr(plugins, "CURRENT", 3)
     monkeypatch.setattr(plugins, "READABLE", frozenset({2, 3}))
     sha256 = _sha256(first)
-    (root / "dl" / sha256[:2] / f"{sha256}.tar.gz").unlink()
+    (root / "dl" / sha256[:2] / sha256).unlink()
     tree = index.Index(root)
     tree.add([build_collection(tmp_path / "c.tar.gz", version="3.0.0")])
     assert [o["version"] for o in tree.files["outdated"]] == ["1.0.0"]
@@ -321,7 +344,7 @@ def test_dl_in_the_index(tmp_path: Path) -> None:
     sha256 = _sha256(tarball)
     index.Index(root).add([tarball])
 
-    assert (root / "artifacts" / sha256[:2] / f"{sha256}.tar.gz").read_bytes() == tarball.read_bytes()
+    assert (root / "artifacts" / sha256[:2] / sha256).read_bytes() == tarball.read_bytes()
 
 
 def test_listed_index_file_missing(tmp_path: Path, root: Path) -> None:

@@ -30,7 +30,7 @@ from . import _galaxy as galaxy
 from . import _plugins as plugins
 
 DEFAULT_INDEX = "index/{namespace}/{name}.jsonl"
-DEFAULT_DL = "dl/{sha256-prefix}/{sha256-checksum}.tar.gz"
+DEFAULT_DL = "dl/{sha256-prefix}/{sha256-checksum}"
 COLLECTIONS = "collections.json"
 PLUGINS = "plugins.jsonl"
 log = logging.getLogger("alai_index")
@@ -171,7 +171,7 @@ def _derived_dl(root: str, dl: str | os.PathLike[str] | None) -> str:
             + "--dl-template gives the URL they're published at"
         )
     prefix = "" if rel == os.curdir else rel.replace(os.sep, "/") + "/"
-    return prefix + "{sha256-prefix}/{sha256-checksum}.tar.gz"
+    return prefix + "{sha256-prefix}/{sha256-checksum}"
 
 
 def _artifact_path(
@@ -979,7 +979,7 @@ class Index:
         if (got := hashlib.sha256(data).hexdigest()) != sha256:
             return _failed(name, version, "sha256_mismatch", f"got {got}, not {sha256}")
         os.makedirs(tmp)
-        path = os.path.join(tmp, "download.tar.gz")
+        path = os.path.join(tmp, "download")
         _write(path, data)
         published = _rfc3339(detail.get("created_at")) or created or now()
         try:
@@ -1036,7 +1036,7 @@ class Index:
         if hashlib.sha256(data).hexdigest() != line.sha256:
             raise Error(f"{path} isn't the artifact {line.name} {line.version.text} has, its sha256 differs")
         os.makedirs(tmp)
-        copy = os.path.join(tmp, "artifact.tar.gz")
+        copy = os.path.join(tmp, "artifact")
         _write(copy, data)
         dest = os.path.join(tmp, "collection")
         try:
@@ -1156,7 +1156,7 @@ class Index:
             raise Error(f"{path} doesn't exist")
         # Extracted from a copy, so the bytes checked are the bytes hashed and written.
         os.makedirs(tmp)
-        copy = os.path.join(tmp, "artifact.tar.gz")
+        copy = os.path.join(tmp, "artifact")
         _write(copy, data)
         dest = os.path.join(tmp, "collection")
         try:

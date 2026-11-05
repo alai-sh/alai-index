@@ -29,7 +29,7 @@ description of each key.
   "written": {
     "dl": [], // (5)!
     "index": [ // (6)!
-      "dl/8f/8f1d1a0742d00e21690598744960a5789f6b70f065cc1da5f8a104679e64ab05.tar.gz",
+      "dl/8f/8f1d1a0742d00e21690598744960a5789f6b70f065cc1da5f8a104679e64ab05",
       "index/corp/base.jsonl",
       "plugins.jsonl",
       "collections.json"

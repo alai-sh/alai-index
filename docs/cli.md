@@ -50,7 +50,7 @@ $ alai-index config [OPTIONS]
 | `--plugin-cache DIR` | The directory of the plugin cache, which is never published and can always be made again from the artifacts, ROOT/plugin-cache by default |
 | `--dl DIR` | The directory of the artifacts, ROOT/dl by default. For a dl template on another host, the host's root |
 | `--index TEMPLATE` | Where each collection's index file is, index/{namespace}/{name}.jsonl by default |
-| `--dl-template TEMPLATE` | The URL clients download each artifact from, with {sha256-checksum} in it, by default the artifacts' directory as a path in the index, dl/{sha256-prefix}/{sha256-checksum}.tar.gz |
+| `--dl-template TEMPLATE` | The URL clients download each artifact from, with {sha256-checksum} in it, by default the artifacts' directory as a path in the index, dl/{sha256-prefix}/{sha256-checksum} |
 | `--listing`, `--no-listing` | Whether the index has collections.json, which it does by default |
 | `--plugins`, `--no-plugins` | Whether the index has plugins.jsonl, which it does by default |
 
