@@ -23,6 +23,23 @@ fetches what a command reads into the tree and publishes what it writes. The
 one exception is [`galaxy-mirror`](mirroring.md), which downloads new
 versions from a Galaxy server to bring the index in line with it.
 
+## Installing
+
+alai-index is published on [PyPI](https://pypi.org/project/alai-index/).
+When it's used often, [uv](https://docs.astral.sh/uv/) can install it as a
+tool so `alai-index` is on the `PATH`.
+
+```console
+$ uv tool install alai-index
+```
+
+When it's only needed once, such as in a CI job, `uvx` runs it without
+installing it.
+
+```console
+$ uvx alai-index config --root my-index
+```
+
 ## Running a command
 
 Every command works on the index in the current directory unless `--root`
