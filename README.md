@@ -20,6 +20,23 @@ added ns.dep 2.1.0
 $ python -m http.server -d my-index
 ```
 
+## Installing
+
+alai-index is published on [PyPI](https://pypi.org/project/alai-index/).
+When it's used often, [uv](https://docs.astral.sh/uv/) can install it as a
+tool so `alai-index` is on the `PATH`.
+
+```console
+$ uv tool install alai-index
+```
+
+When it's only needed once, such as in a CI job, `uvx` runs it without
+installing it.
+
+```console
+$ uvx alai-index config --root my-index
+```
+
 The [documentation](https://alai.sh/alai-index/) covers everything from
 [the tree](https://alai.sh/alai-index/the-tree/) an index is made of to
 [every command](https://alai.sh/alai-index/cli/) and its options.
