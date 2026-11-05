@@ -41,7 +41,7 @@ class GalaxyError(Exception):
     """A request failed. ``kind`` names it as a caller's failure ledger would."""
 
     def __init__(self, url: str, status: int | None, message: str) -> None:
-        super().__init__(f"{url}: {status or ''} {message}".strip())
+        super().__init__(f"{url}: {f'{status} ' if status else ''}{message}")
         self.url = url
         self.status = status
 
@@ -85,8 +85,11 @@ class GalaxyClient:
         self._v3: str | None = None
 
     def _url(self, url: str) -> str:
-        # Pulp's next links come back as http://, so a link to the server's own host keeps the server's scheme.
         parts, server = urllib.parse.urlsplit(url), urllib.parse.urlsplit(self.server)
+        # A server's answer could name a file: URL, which urlopen would read from disk.
+        if parts.scheme not in ("http", "https"):
+            raise GalaxyError(url, None, "isn't an http or https URL")
+        # Pulp's next links come back as http://, so a link to the server's own host keeps the server's scheme.
         if parts.netloc == server.netloc and parts.scheme != server.scheme:
             return urllib.parse.urlunsplit((server.scheme, *parts[1:]))
         return url
@@ -95,7 +98,7 @@ class GalaxyClient:
         url = self._url(url)
         last: Exception | None = None
         for attempt in range(self.retries):
-            # Only ever an http or https URL, from the server given or its answers.
+            # Only ever an http or https URL, as _url checks.
             req = urllib.request.Request(url, headers={"User-Agent": self.user_agent})  # noqa: S310
             start = time.monotonic()
             try:
@@ -141,7 +144,9 @@ class GalaxyClient:
         while next_url:
             page = self._json(next_url)
             # Anything else is no item ansible-galaxy would read, so it's left out.
-            yield from (item for item in page.get("data", page.get("results", [])) if isinstance(item, dict))
+            items: object = page.get("data") or page.get("results") or []
+            if isinstance(items, list):
+                yield from (item for item in _t.cast("list[object]", items) if isinstance(item, dict))
             links: dict[str, _t.Any] = page.get("links") or {}
             next_url = urllib.parse.urljoin(next_url, links["next"]) if links.get("next") else None
 

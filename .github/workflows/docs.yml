@@ -27,22 +27,17 @@ on:
 permissions:
   contents: read
 
-env:
-  UV_VERSION: "0.13.6"  # Keep in sync with ci.yml
-
 jobs:
   build:
     name: Build
-    runs-on: ubuntu-26.04
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      # Its own cache, as ci.yml's jobs name theirs: caches are the repository's, so it would share a key with them.
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
-          version: ${{ env.UV_VERSION }}
           cache-suffix: docs
 
       # tox and the tools only, as tox builds alai-index itself.
@@ -60,7 +55,7 @@ jobs:
     name: Deploy
     needs: build
     if: github.event_name == 'push'
-    runs-on: ubuntu-26.04
+    runs-on: ubuntu-latest
     concurrency:
       group: pages
       cancel-in-progress: false

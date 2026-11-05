@@ -167,18 +167,20 @@ def _remove(args: argparse.Namespace) -> int:
     return _finish(args, tree, tree.remove(args.targets))
 
 
-def _generate_indexes(args: argparse.Namespace) -> int:
-    tree = _open(args)
-    results = tree.generate_indexes(args.targets)
+def _generated(args: argparse.Namespace, tree: Index, results: list[Change]) -> int:
+    """``_finish`` for a generate command, which also says each public file it wrote, or that nothing changed."""
     written = [f"wrote {path}" for path in tree.files["written"]["index"]]
     return _finish(args, tree, results, written if results or written else ["nothing changed"])
 
 
+def _generate_indexes(args: argparse.Namespace) -> int:
+    tree = _open(args)
+    return _generated(args, tree, tree.generate_indexes(args.targets))
+
+
 def _generate_plugins(args: argparse.Namespace) -> int:
     tree = _open(args)
-    results = tree.generate_plugins(args.targets, from_plugin_cache=args.from_plugin_cache)
-    written = [f"wrote {path}" for path in tree.files["written"]["index"] if path != "collections.json"]
-    return _finish(args, tree, results, written if results or written else ["nothing changed"])
+    return _generated(args, tree, tree.generate_plugins(args.targets, from_plugin_cache=args.from_plugin_cache))
 
 
 def _galaxy_mirror(args: argparse.Namespace) -> int:
@@ -372,7 +374,7 @@ def _parser() -> argparse.ArgumentParser:
         parents=[changes],
         help="extract plugins again and work plugins.jsonl out again",
         description="Extract plugins again from the artifacts, and work plugins.jsonl out again. The artifacts must "
-        + "be on disk. Without collections, it's every collection, and plugins.jsonl is made from nothing.",
+        + "be on disk. Without collections, it's every collection, and a lost plugins.jsonl is made again.",
     )
     generate.add_argument("targets", nargs="*", metavar="NS.NAME[:VERSION]", help=target_help)
     generate.add_argument(

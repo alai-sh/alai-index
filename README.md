@@ -1,7 +1,12 @@
 # alai-index
 
-> **Warning:** alai-index is a proof of concept. Nothing is released, and
-> anything can change.
+[![PyPI](https://img.shields.io/pypi/v/alai-index)](https://pypi.org/project/alai-index/)
+[![CI](https://github.com/alai-sh/alai-index/actions/workflows/ci.yml/badge.svg)](https://github.com/alai-sh/alai-index/actions/workflows/ci.yml)
+
+> **Preview:** The commands and their options can still change in a release
+> before 1.0. The index alai-index writes doesn't, as the
+> [index format](https://alai.sh/alai-index/index-format/) is versioned on its
+> own.
 
 alai-index builds and operates an [alai](https://github.com/alai-sh/alai)
 index as a tree of files on disk. The tree can then be published to a web

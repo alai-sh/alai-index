@@ -242,6 +242,16 @@ def test_remove_hashed_keeps_the_old_file(tmp_path: Path) -> None:
     assert len(list((root / "index").rglob("*.jsonl"))) == 1
 
 
+def test_remove_checks_dependents_with_unreadable_requirements(root: Path) -> None:
+    # As a mirror has them. The dependency still has to be met.
+    path = root / "index" / "ns" / "dep.jsonl"
+    path.write_bytes(path.read_bytes().replace(b'"yanked"', b'"requires_ansible":"not a spec","yanked"'))
+    relist(root, "ns.dep")
+
+    with pytest.raises(index.Error, match=r"ns\.dep 1\.0\.0 needs ns\.coll >=2\.0\.0"):
+        index.Index(root).remove(["ns.coll:2.0.0"])
+
+
 def test_remove_ignores_what_was_already_unmet(root: Path) -> None:
     path = root / "index" / "ns" / "dep.jsonl"
     path.write_bytes(path.read_bytes().replace(b'">=2.0.0"', b'">=9.0.0"'))

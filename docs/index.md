@@ -1,9 +1,10 @@
 # alai-index
 
-!!! warning "Proof of concept"
+!!! warning "Preview"
 
-    alai-index is a proof of concept. Nothing is released, and anything can
-    change.
+    The commands and their options can still change in a release before 1.0.
+    The index alai-index writes doesn't, as the [index format](index-format.md)
+    is versioned on its own.
 
 alai-index builds and operates an [alai](https://docs.alai.sh/) index as a
 tree of files on disk. The tree can then be published to a web server, a

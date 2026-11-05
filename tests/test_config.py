@@ -93,6 +93,13 @@ def test_dl_directory_outside_the_index_needs_a_template(tmp_path: Path) -> None
         index.configure(tmp_path / "index", dl=tmp_path / "artifacts")
 
 
+def test_dl_and_template_change_together(tmp_path: Path) -> None:
+    index.configure(tmp_path)
+    config = index.configure(tmp_path, dl=tmp_path / "elsewhere", dl_template="https://dl.example/{sha256-checksum}")
+
+    assert config.dl == "https://dl.example/{sha256-checksum}"
+
+
 def test_dl_directory_the_template_doesnt_use(tmp_path: Path) -> None:
     index.configure(tmp_path)
 

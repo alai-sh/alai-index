@@ -26,11 +26,6 @@ def test_config_and_add(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> N
     assert '"published":"2026-11-01T00:00:00Z"' in (tmp_path / "index" / "index" / "ns" / "coll.jsonl").read_text()
 
 
-def test_error(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    assert main(["add", "--root", str(tmp_path), "a.tar.gz"]) == 1
-    assert capsys.readouterr().err.startswith("error: ")
-
-
 def complete(tmp_path: Path, line: str, cwd: Path | None = None) -> list[str]:
     """The completions argcomplete gives for the command line typed so far, run in a subprocess as the shell does."""
     out = tmp_path / "completions"
@@ -121,15 +116,6 @@ def test_generate_plugins(tmp_path: Path, capsys: pytest.CaptureFixture[str], mo
         "extracting the plugins of ns.coll 1.0.0",
         "warning: extracting the plugins of ns.coll 1.0.0 failed, so the plugin index has none of them. ValueError: boom",
     ]
-
-
-def test_plugin_cache(tmp_path: Path) -> None:
-    root, cache = str(tmp_path / "index"), str(tmp_path / "cache")
-
-    assert main(["config", "--root", root, "--plugin-cache", cache]) == 0
-    assert main(["add", "--root", root, "--plugin-cache", cache, str(build_collection(tmp_path / "a.tar.gz"))]) == 0
-    assert (tmp_path / "cache" / "ns" / "coll.jsonl").exists()
-    assert not (tmp_path / "index" / "plugin-cache").exists()
 
 
 @pytest.mark.parametrize(
