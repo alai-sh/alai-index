@@ -199,12 +199,16 @@ def test_failed_extraction_still_adds(tmp_path: Path, root: Path, monkeypatch: p
     monkeypatch.setattr("alai_core.extract.extract", fail)
     tarball = build_collection(tmp_path / "a.tar.gz", modules={"a": module("A")})
 
-    assert index.Index(root).add([tarball])[0].details == {
+    tree = index.Index(root)
+    assert tree.add([tarball])[0].details == {
         "sha256": hashlib.sha256(tarball.read_bytes()).hexdigest(),
         "error": "ValueError: boom",
     }
     assert _lines(_cache(root)) == [{"v": 1, "version": "1.0.0", "error": "ValueError: boom"}]
     assert (root / "plugins.jsonl").read_bytes() == b""
+    assert tree.warnings == [
+        "extracting the plugins of ns.coll 1.0.0 failed, so the plugin index has none of them. ValueError: boom"
+    ]
 
 
 def test_cache_lines_follow_the_index(tmp_path: Path, root: Path) -> None:
@@ -408,16 +412,3 @@ def test_name_and_version_are_always_checked(tmp_path: Path, root: Path) -> None
 
     with pytest.raises(index.Error, match="version"):
         index.Index(root).add([tarball], skip=index.SKIPPABLE_CHECKS)
-
-
-def test_failed_extraction_warns(tmp_path: Path, root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    def fail(path: object) -> None:
-        raise ValueError("boom")
-
-    monkeypatch.setattr("alai_core.extract.extract", fail)
-    tree = index.Index(root)
-    tree.add([build_collection(tmp_path / "a.tar.gz")])
-
-    assert tree.warnings == [
-        "extracting the plugins of ns.coll 1.0.0 failed, so the plugin index has none of them. ValueError: boom"
-    ]

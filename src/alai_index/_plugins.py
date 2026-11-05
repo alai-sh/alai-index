@@ -112,7 +112,7 @@ def plugin_lines(collection: str, extractions: _c.Mapping[str, _c.Mapping[str, o
             present.setdefault(key, []).append(v)
             if desc := p.get("short_description"):
                 descs[key] = desc
-    routing = _t.cast("dict[str, dict[str, object]]", good[latest]["routing"])
+    routing = _t.cast("dict[str, dict[str, object]]", good[latest].get("routing", {}))
 
     pool = stable or versions
     result: list[PluginEntry] = []
@@ -143,14 +143,20 @@ def merge(
 ) -> bytes:
     """``plugins.jsonl`` with each collection in ``lines`` given those lines in place of the ones it had, sorted by type,
     name and collection. Every other line of a collection in ``listed`` is kept as written, unknown fields included.
-    A line for a collection the index doesn't have is dropped, so the plugin index only describes the index."""
+    A line for a collection the index doesn't have is dropped, so the plugin index only describes the index, and so
+    is one that isn't a JSON object, as the plugin index can always be made again."""
     kept: list[tuple[tuple[str, str, str], str]] = []
     for raw in (existing or b"").splitlines():
-        if not raw.strip():
+        try:
+            data: object = json.loads(raw) if raw.strip() else None
+        except ValueError:
             continue
-        data = json.loads(raw)
+        if not isinstance(data, dict):
+            continue
+        data = _t.cast("dict[str, object]", data)
         if data.get("collection") in listed and data.get("collection") not in lines:
-            kept.append(((data.get("type", ""), data.get("name", ""), data.get("collection", "")), raw.decode()))
+            key = tuple(str(data.get(k, "")) for k in ("type", "name", "collection"))
+            kept.append((_t.cast("tuple[str, str, str]", key), raw.decode()))
     for entries in lines.values():
         kept.extend(((p.type, p.name, p.collection), p.to_json()) for p in entries)
     kept.sort(key=lambda k: k[0])

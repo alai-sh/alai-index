@@ -169,7 +169,7 @@ $ alai-index generate-indexes [OPTIONS] [NS.NAME[:VERSION] ...]
 
 ## alai-index generate-plugins
 
-Extract plugins again from the artifacts, and work plugins.jsonl out again. The artifacts must be on disk. Without collections, it's every collection, and plugins.jsonl is made from nothing.
+Extract plugins again from the artifacts, and work plugins.jsonl out again. The artifacts must be on disk. Without collections, it's every collection, and a lost plugins.jsonl is made again.
 
 [Making plugins.jsonl again from the plugin cache](casts/generate-plugins.cast){ .cli-cast }
 

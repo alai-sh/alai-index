@@ -117,10 +117,7 @@ def configure(
     """
     root = os.fspath(root)
     path = os.path.join(root, "config.json")
-    tree = Index(root, plugin_cache=plugin_cache, dl=dl) if os.path.exists(path) else None
-    current = tree.config if tree else None
-    # An index's listing is never made empty, which would make every collection look new to the next add.
-    has_collections = tree is not None and len(tree._listing()) > 0
+    current = _read_config(path) if os.path.exists(path) else None
     if listing is None:
         listing = current is None or current.collections is not None
     if plugins is None:
@@ -135,13 +132,15 @@ def configure(
         )
     except ValueError as e:
         raise Error(str(e)) from None
-    _check_layout(root, _cache_dir(root, plugin_cache), dl, config)
+    # Checked with the new config, so a template and the directory it goes with can change together.
+    tree = Index(root, plugin_cache=plugin_cache, dl=dl, config=config)
+    # An index's listing is never made empty, which would make every collection look new to the next add.
+    has_collections = current is not None and len(tree._listing()) > 0
     if config != current:
         if has_collections and current is not None and (config.index, config.dl) != (current.index, current.dl):
             raise Error(f"{root} already has collections, which changing where files are would leave behind")
         _write(path, config.to_json().encode())
 
-    tree = Index(root, plugin_cache=plugin_cache, dl=dl)
     if not os.path.exists(tree.listing_file):
         _write(tree.listing_file, Collections({}).to_json().encode())
     if config.plugins and not os.path.exists(tree.file(config.plugins)):
@@ -370,14 +369,40 @@ def _rfc3339(value: object) -> str | None:
 
 class _Staged(_t.NamedTuple):
     line: CollectionVersion
-    data: bytes
+    copy: str
+    """The copy of the artifact staging wrote, which stays until the caller deletes its directory."""
     extraction: dict[str, object] | None
     """Its plugin extraction, or None for an index without a plugin index."""
 
 
+def _read_config(path: str) -> Config:
+    data = _read(path)
+    if data is None:
+        raise Error(f"{path} doesn't exist. 'alai-index config' makes one")
+    try:
+        return Config.parse(data)
+    except ValueError as e:
+        raise Error(f"{path}: {e}") from None
+
+
+def _unpack(data: bytes, tmp: str) -> str | artifact.ExtractError:
+    """Write an artifact into ``tmp`` and unpack it there, returning the collection's directory. If alai-core refuses
+    the artifact, why."""
+    os.makedirs(tmp)
+    copy = os.path.join(tmp, "artifact")
+    _write(copy, data)
+    dest = os.path.join(tmp, "collection")
+    try:
+        artifact.extract(copy, dest)
+    except artifact.ExtractError as e:
+        return e
+    return dest
+
+
 class Index:
     """The index whose tree is at ``root``, with its plugin cache in ``plugin_cache``, ``<root>/plugin-cache`` by default,
-    and its artifacts in ``dl``, ``<root>/dl`` by default, for a ``dl`` template on another host.
+    and its artifacts in ``dl``, ``<root>/dl`` by default, for a ``dl`` template on another host. ``config`` is used in
+    place of ``config.json`` when given, for ``configure`` to check a config before writing it.
 
     Raises:
         Error: ``config.json`` is missing or isn't valid, or a template leads into the plugin cache.
@@ -389,6 +414,7 @@ class Index:
         *,
         plugin_cache: str | os.PathLike[str] | None = None,
         dl: str | os.PathLike[str] | None = None,
+        config: Config | None = None,
     ) -> None:
         self.root = os.fspath(root)
         self.plugin_cache = _cache_dir(self.root, plugin_cache)
@@ -402,16 +428,11 @@ class Index:
         wasn't on disk to extract it again."""
         self.warnings: list[str] = []
         """Each warning the commands run on this index gave."""
-        path = os.path.join(self.root, "config.json")
-        data = _read(path)
-        if data is None:
-            raise Error(f"{path} doesn't exist. 'alai-index config' makes one")
-        try:
-            self.config = Config.parse(data)
-        except ValueError as e:
-            raise Error(f"{path}: {e}") from None
+        self.config = config if config is not None else _read_config(os.path.join(self.root, "config.json"))
         _check_layout(self.root, self.plugin_cache, self.dl, self.config)
+        # Each file read once a command, and again after a commit writes them.
         self._caches: dict[str, dict[str, dict[str, object]]] = {}
+        self._index_lines: dict[str, list[CollectionVersion]] = {}
 
     @property
     def listing_file(self) -> str:
@@ -473,8 +494,13 @@ class Index:
         with tempfile.TemporaryDirectory(prefix="alai-index-", ignore_cleanup_errors=True) as tmp:
             staged: list[_Staged] = []
             for i, tarball in enumerate(tarballs):
-                log.info("reading %s", os.fspath(tarball))
-                staged.append(self._stage(os.fspath(tarball), os.path.join(tmp, str(i)), published, skip))
+                path = os.fspath(tarball)
+                log.info("reading %s", path)
+                data = _read(path)
+                if data is None:
+                    raise Error(f"{path} doesn't exist")
+                # The copy staged on disk is what's written, so only one tarball is in memory at a time.
+                staged.append(self._stage(data, os.path.join(tmp, str(i)), path, published, skip))
 
             lines: dict[str, list[CollectionVersion]] = {}
             results: list[Change] = []
@@ -531,7 +557,7 @@ class Index:
             self._commit(
                 touched,
                 listing,
-                artifacts=[(s.line, s.data) for s in new],
+                artifacts=[(s.line, s.copy) for s in new],
                 cache=cache,
                 plugin_index=plugin_index,
             )
@@ -598,16 +624,19 @@ class Index:
         """
         listing = self._listing()
         selected = self._select(targets, listing)
+        wanted = set(selected)
         before = {name: self._lines(name, listing) for name, _ in selected}
         gone = [line for name, version in selected for line in before[name] if line.version.text == version]
-        lines = {name: [line for line in have if line not in gone] for name, have in before.items()}
+        lines = {
+            name: [line for line in have if (name, line.version.text) not in wanted] for name, have in before.items()
+        }
 
         unmet: list[str] = []
         for name in listing:
             for line in lines[name] if name in lines else self._lines(name, listing):
-                if line.yanked or line.problem is not None:
+                if line.yanked:
                     continue
-                for dep, req in line.deps:
+                for dep, req in _readable_deps(line):
                     # Only what the removal breaks. A mirror can hold a requirement nothing ever met.
                     if dep in lines and _met(req, before[dep]) and not _met(req, lines[dep]):
                         unmet.append(f"{line.name} {line.version.text} needs {dep} {req.text}")
@@ -679,12 +708,12 @@ class Index:
         """A version's line read again from its artifact, with what the index set kept from ``old``."""
         path = self.artifact_file(old)
         where = f"{old.name} {old.version.text}"
-        if not os.path.exists(path):
-            raise Error(f"{path} is missing, which reading {where}'s artifact needs")
+        data = self._artifact_bytes(old)
         log.info("reading the artifact of %s", where)
-        staged = self._stage(path, tmp, old.published, SKIPPABLE_CHECKS, extract=False)
-        if staged.line.sha256 != old.sha256:
-            raise Error(f"{path} isn't the artifact {where} has, its sha256 differs")
+        try:
+            staged = self._stage(data, tmp, path, old.published, SKIPPABLE_CHECKS, extract=False)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
         if (staged.line.name, staged.line.version.text) != (old.name, old.version.text):
             raise Error(f"{path} is for {staged.line.name} {staged.line.version.text}, not {where}")
         return _with(staged.line, yanked=old.yanked, deprecated=old.deprecated)
@@ -760,7 +789,7 @@ class Index:
         ``published`` from the server's ``created_at``, and their artifacts checked against its sha256. They're copied as
         published, so the ``dependencies`` and ``requirements`` checks warn rather than refuse. A version is yanked only
         when its own page, or the collection's, is a 404, so a listing that's cut short can never yank anything, and a
-        yanked one the server lists again is checked and unyanked. A version the index has is checked against the
+        yanked one the server lists again with the same artifact is unyanked. A version the index has is checked against the
         server's sha256 when it's yanked, its ``created_at`` differs from the one ``checked`` gives or else from
         ``published``, or with ``revalidate``. The same artifact is ``unchanged``, and another is a ``conflict``, never
         written. The collection's ``deprecated`` goes on every line.
@@ -878,6 +907,8 @@ class Index:
 
             if served is None:
                 listings.pop(name, None)
+                if not lines:
+                    self.warnings.append(f"{name} isn't on the server or in the index")
                 lines = [_with(line, yanked=True) for line in lines]
                 results.extend(_changes(name, have, lines))
                 return _Mirrored(lines, {}, 0)
@@ -978,12 +1009,9 @@ class Index:
             return _failed(name, version, e.kind, str(e))
         if (got := hashlib.sha256(data).hexdigest()) != sha256:
             return _failed(name, version, "sha256_mismatch", f"got {got}, not {sha256}")
-        os.makedirs(tmp)
-        path = os.path.join(tmp, "download")
-        _write(path, data)
         published = _rfc3339(detail.get("created_at")) or created or now()
         try:
-            staged = self._stage(path, os.path.join(tmp, "stage"), published, SKIPPABLE_CHECKS)
+            staged = self._stage(data, tmp, f"{name} {version}", published, SKIPPABLE_CHECKS)
         except Error as e:
             return _failed(name, version, "bad_artifact", str(e))
         finally:
@@ -1024,32 +1052,25 @@ class Index:
             results.append(Change(name, version, "conflict", details))
         else:
             results.append(Change(name, version, "unchanged", {"sha256": sha256, "published": published}))
-        return _with(line, yanked=False) if line.yanked else line
+        # Only unyanked when the server serves the index's artifact again. What a conflict means is the caller's call.
+        return _with(line, yanked=False) if line.yanked and sha256 == line.sha256 else line
 
-    def _unpack(self, line: CollectionVersion, tmp: str) -> str | artifact.ExtractError:
-        """Unpack a version's artifact, checked against its line, into ``tmp``. If alai-core refuses one it once took,
-        why, which costs the version its plugins rather than stopping the command."""
+    def _artifact_bytes(self, line: CollectionVersion) -> bytes:
+        """A version's artifact from the tree, checked against its line."""
         path = self.artifact_file(line)
         data = _read(path)
         if data is None:
             raise Error(f"{path} is missing, which reading {line.name} {line.version.text}'s artifact needs")
         if hashlib.sha256(data).hexdigest() != line.sha256:
             raise Error(f"{path} isn't the artifact {line.name} {line.version.text} has, its sha256 differs")
-        os.makedirs(tmp)
-        copy = os.path.join(tmp, "artifact")
-        _write(copy, data)
-        dest = os.path.join(tmp, "collection")
-        try:
-            artifact.extract(copy, dest)
-        except artifact.ExtractError as e:
-            return e
-        return dest
+        return data
 
     def _extract_from(self, line: CollectionVersion, tmp: str, results: list[Change]) -> dict[str, object]:
         """A version's extraction from its artifact, unpacked into ``tmp`` and deleted again straight after, so a
-        command over many versions never holds more than one unpacked artifact."""
+        command over many versions never holds more than one unpacked artifact. If alai-core refuses an artifact it
+        once took, that costs the version its plugins rather than stopping the command."""
         try:
-            return self._extracted(line.name, line.version.text, self._unpack(line, tmp), results)
+            return self._extracted(line.name, line.version.text, _unpack(self._artifact_bytes(line), tmp), results)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
@@ -1140,29 +1161,23 @@ class Index:
             cached[name] = _Cached(entries, complete)
         return cached
 
-    def _stage(self, path: str, tmp: str, published: str, skip: _c.Collection[str], *, extract: bool = True) -> _Staged:
-        """Read and check an artifact, and make its line, and its extraction unless ``extract`` is False. It's unpacked
-        into ``tmp``, which is deleted again before returning."""
+    def _stage(
+        self, data: bytes, tmp: str, name: str, published: str, skip: _c.Collection[str], *, extract: bool = True
+    ) -> _Staged:
+        """Check an artifact and make its line, and its extraction unless ``extract`` is False. It's written and
+        unpacked in ``tmp``, which is made, and the unpacked collection is deleted again before returning. ``name`` is
+        what an error calls the artifact."""
         try:
-            return self._stage_unpacked(path, tmp, published, skip, extract=extract)
+            return self._stage_unpacked(data, tmp, name, published, skip, extract=extract)
         finally:
-            shutil.rmtree(tmp, ignore_errors=True)
+            shutil.rmtree(os.path.join(tmp, "collection"), ignore_errors=True)
 
     def _stage_unpacked(
-        self, path: str, tmp: str, published: str, skip: _c.Collection[str], *, extract: bool
+        self, data: bytes, tmp: str, path: str, published: str, skip: _c.Collection[str], *, extract: bool
     ) -> _Staged:
-        data = _read(path)
-        if data is None:
-            raise Error(f"{path} doesn't exist")
-        # Extracted from a copy, so the bytes checked are the bytes hashed and written.
-        os.makedirs(tmp)
-        copy = os.path.join(tmp, "artifact")
-        _write(copy, data)
-        dest = os.path.join(tmp, "collection")
-        try:
-            artifact.extract(copy, dest)
-        except artifact.ExtractError as e:
-            raise Error(f"{path}: {e}") from None
+        dest = _unpack(data, tmp)
+        if not isinstance(dest, str):
+            raise Error(f"{path}: {dest}")
 
         try:
             info = collection.Manifest.parse(_read(os.path.join(dest, "MANIFEST.json")) or b"", name=path)
@@ -1203,7 +1218,7 @@ class Index:
         extraction = (
             plugins.extraction(dest, line.version.text) if extract and self.config.plugins is not None else None
         )
-        return _Staged(line, data, extraction)
+        return _Staged(line, os.path.join(tmp, "artifact"), extraction)
 
     def _listing(self) -> Collections:
         """``collections.json``, every collection the index has and its current index file."""
@@ -1217,12 +1232,17 @@ class Index:
 
     def _lines(self, name: str, listing: Collections) -> list[CollectionVersion]:
         """A collection's lines, in publication order, from its current index file, or none if the index doesn't have
-        it.
+        it. The file is read once a command, and each call gets its own list to change.
 
         Raises:
             Error: The index file is missing, isn't the one ``collections.json`` names, or has lines this alai-index
                 can't read.
         """
+        if name not in self._index_lines:
+            self._index_lines[name] = self._read_lines(name, listing)
+        return list(self._index_lines[name])
+
+    def _read_lines(self, name: str, listing: Collections) -> list[CollectionVersion]:
         entry = listing.get(name)
         if entry is None:
             return []
@@ -1269,23 +1289,27 @@ class Index:
         lines: dict[str, list[CollectionVersion]],
         listing: Collections,
         *,
-        artifacts: _c.Sequence[tuple[CollectionVersion, bytes]] = (),
+        artifacts: _c.Sequence[tuple[CollectionVersion, str]] = (),
         cache: dict[str, _Cached] | None = None,
         plugin_index: bytes | None = None,
         removed: _c.Sequence[CollectionVersion] = (),
     ) -> None:
         """Write a change to the collections in ``lines``, given all their lines, and note each file in ``files``.
 
-        Files are written in the order that never leaves the index naming a file that isn't there. That's artifacts,
-        the plugin cache, index files, ``plugins.jsonl`` and ``collections.json``, and last deleting what ``removed``
-        and collections left with no lines leave behind. A file whose bytes wouldn't change isn't written. Without
-        ``plugin_index``, ``plugins.jsonl`` isn't written. ``collections.json`` always is, as it's the record of which
-        index file is each collection's.
+        Files are written in the order that never leaves the index naming a file that isn't there. That's
+        ``artifacts``, each version added and the staged copy of its artifact, the plugin cache, index files,
+        ``plugins.jsonl`` and ``collections.json``, and last deleting what ``removed`` and collections left with no
+        lines leave behind. A file whose bytes wouldn't change isn't written. Without ``plugin_index``,
+        ``plugins.jsonl`` isn't written. ``collections.json`` always is, as it's the record of which index file is each
+        collection's.
         """
         write, remove = self._write, self._remove
+        self._index_lines.clear()
+        self._caches.clear()
 
-        for line, data in artifacts:
-            write("artifact", self.artifact_file(line), data)
+        for line, copy in artifacts:
+            with open(copy, "rb") as f:
+                write("artifact", self.artifact_file(line), f.read())
         # Each collection's extractions are in its index file's order.
         for name, found in (cache or {}).items():
             if lines.get(name) != []:
@@ -1358,5 +1382,5 @@ def _write(path: str, data: bytes) -> None:
             f.write(data)
         os.replace(tmp, path)
     except BaseException:
-        os.unlink(tmp)
+        _remove(tmp)
         raise

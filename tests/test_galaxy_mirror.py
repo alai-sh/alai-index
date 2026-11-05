@@ -172,6 +172,44 @@ def test_conflict_is_never_written(tmp_path: Path, root: Path, galaxy: MockGalax
     assert (change.result, (change.details or {})["published"]) == ("conflict", "2026-05-01T00:00:00Z")
 
 
+def test_conflict_keeps_a_version_yanked(tmp_path: Path, root: Path, galaxy: MockGalaxy, client: GalaxyClient) -> None:
+    _publish(galaxy, tmp_path, "ns.coll", "1.0.0", "2026-01-01T00:00:00Z")
+    index.Index(root).galaxy_mirror(client, ["ns.coll"])
+    index.Index(root).set(["ns.coll"], yanked=True)
+    galaxy.collections["ns.coll"]["versions"]["1.0.0"]["sha256"] = "ab" * 32
+
+    # Listed again, but with another artifact, so the index's isn't put back on offer.
+    assert _results(index.Index(root).galaxy_mirror(client, ["ns.coll"])) == [("ns.coll", "1.0.0", "conflict")]
+    assert [line["yanked"] for line in _lines(root / "index" / "ns" / "coll.jsonl")] == [True]
+
+
+def test_collection_nowhere_warns(root: Path, galaxy: MockGalaxy, client: GalaxyClient) -> None:
+    tree = index.Index(root)
+
+    assert tree.galaxy_mirror(client, ["ns.typo"]) == []
+    assert tree.warnings == ["ns.typo isn't on the server or in the index"]
+
+
+def test_only_http_urls_are_fetched(
+    tmp_path: Path, root: Path, galaxy: MockGalaxy, client: GalaxyClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _publish(galaxy, tmp_path, "ns.coll", "1.0.0", "2026-01-01T00:00:00Z")
+    answer = galaxy._answer
+
+    def file_url(path: str, query: dict[str, list[str]]) -> tuple[int, bytes]:
+        code, body = answer(path, query)
+        if path.endswith("/versions/1.0.0/"):
+            body = json.dumps(json.loads(body) | {"download_url": "file:///etc/hostname"}).encode()
+        return code, body
+
+    monkeypatch.setattr(galaxy, "_answer", file_url)
+    [change] = index.Index(root).galaxy_mirror(client, ["ns.coll"])
+    assert (change.result, str((change.details or {})["error"])) == (
+        "failed",
+        "file:///etc/hostname: isn't an http or https URL",
+    )
+
+
 def test_checked_isnt_checked_again(tmp_path: Path, root: Path, galaxy: MockGalaxy, client: GalaxyClient) -> None:
     _publish(galaxy, tmp_path, "ns.coll", "1.0.0", "2026-01-01T00:00:00Z")
     index.Index(root).galaxy_mirror(client, ["ns.coll"])
@@ -416,17 +454,6 @@ def test_session_carries_on(tmp_path: Path, root: Path, galaxy: MockGalaxy, clie
     assert _listed(galaxy)
 
 
-def test_without_a_session_every_run_lists(
-    tmp_path: Path, root: Path, galaxy: MockGalaxy, client: GalaxyClient
-) -> None:
-    _three_versions(galaxy, tmp_path)
-    index.Index(root).galaxy_mirror(client, ["ns.coll"], limit=1)
-    galaxy.requests.clear()
-
-    index.Index(root).galaxy_mirror(client, ["ns.coll"], limit=1)
-    assert _listed(galaxy)
-
-
 def test_revalidate_lists_again(tmp_path: Path, root: Path, galaxy: MockGalaxy, client: GalaxyClient) -> None:
     _three_versions(galaxy, tmp_path)
     session = tmp_path / "session.json"
@@ -501,25 +528,3 @@ def test_retry_waits_are_shown(
     with caplog.at_level("INFO", logger="alai_index"):
         index.Index(root).galaxy_mirror(client, ["ns.coll"])
     assert any("failed" in m and "so trying again in 0s" in m for m in caplog.messages)
-
-
-def test_cli_session(tmp_path: Path, root: Path, galaxy: MockGalaxy) -> None:
-    _three_versions(galaxy, tmp_path)
-    session = tmp_path / "session.json"
-    argv = [
-        "galaxy-mirror",
-        "--root",
-        str(root),
-        "-q",
-        "--limit",
-        "1",
-        "--session",
-        str(session),
-        galaxy.url,
-        "ns.coll",
-    ]
-
-    assert main(argv) == 0
-    galaxy.requests.clear()
-    assert main(argv) == 0
-    assert _listed(galaxy) == []

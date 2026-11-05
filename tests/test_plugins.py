@@ -68,6 +68,12 @@ def test_routing_from_latest_and_without_a_plugin() -> None:
     ]
 
 
+def test_extraction_without_routing() -> None:
+    assert [
+        p["name"] for p in _lines({"1.0.0": {"v": plugins.CURRENT, "plugins": [{"type": "module", "name": "a"}]}})
+    ] == ["a"]
+
+
 def test_failed_extraction_has_no_plugins() -> None:
     failed = {"v": plugins.CURRENT, "error": "ValueError: bad"}
 
@@ -87,7 +93,7 @@ def test_merge_replaces_only_the_collections_given() -> None:
         b'{"v":1,"type":"module","name":"a","collection":"ns.coll","since":"1.0.0","short_description":"a desc"}',
         b'{"v":1,"type":"module","name":"z","collection":"other.coll","unknown":1}',
     ]
-    # A collection the index doesn't have loses its lines.
-    assert plugins.merge(existing, {"ns.coll": new}, {"ns.coll"}).splitlines() == [
+    # A collection the index doesn't have loses its lines, and so does a line that isn't a JSON object.
+    assert plugins.merge(existing + b"not json\n[]\n", {"ns.coll": new}, {"ns.coll"}).splitlines() == [
         b'{"v":1,"type":"module","name":"a","collection":"ns.coll","since":"1.0.0","short_description":"a desc"}',
     ]

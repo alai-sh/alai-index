@@ -77,8 +77,9 @@
     for "the artifact's sha256 checksum".
 - Comments are sparse, in short plain sentences, without `;` or `:`.
 - Every `.py` file starts with the two-line copyright and MIT header.
-- Nothing is released, so no compatibility shims. Rename and replace
-  outright.
+- The command line can change in any release before 1.0, so no compatibility
+  shims. Rename and replace outright. The index and the JSON output keep
+  their rules above.
 - Checks are `uv run tox run -f sanity` and `uv run tox run -f py314` (any
   of `py310` to `py315`, `py314t`, `py315t`). The docs build is
   `uv run tox run -e docs`.

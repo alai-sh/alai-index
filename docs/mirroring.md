@@ -47,11 +47,11 @@ The second run finds nothing new to add.
 - **Versions already in the index are checked** against the server's sha256
   checksum when they're yanked, when the server's `created_at` differs from the
   index's `published`, or with `--revalidate`. A yanked version the server
-  lists again is unyanked. A version the server still serves with the same
-  artifact is reported as `unchanged`. If the server now serves a different
-  artifact, a `conflict` is reported with the artifact's details for further
-  analysis. `galaxy-mirror` never replaces a version's artifact, as versions
-  are immutable.
+  lists again with the same artifact is unyanked. A version the server still
+  serves with the same artifact is reported as `unchanged`. If the server now
+  serves a different artifact, a `conflict` is reported with the artifact's
+  details for further analysis. `galaxy-mirror` never replaces a version's
+  artifact, as versions are immutable.
 - **The collection's deprecation** is set on every version.
 
 A version that fails is reported as a warning and the mirror carries on with

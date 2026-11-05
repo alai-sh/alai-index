@@ -142,7 +142,8 @@ def test_one_unpacked_artifact_at_a_time(tmp_path: Path, root: Path, monkeypatch
     seen: list[int] = []
 
     def counting(path: str, version: str) -> dict[str, object]:
-        seen.append(len(list(Path(path).parents[1].iterdir())))
+        # The staged copies of add's tarballs stay, but each unpacked collection is gone before the next.
+        seen.append(sum((d / "collection").exists() for d in Path(path).parents[1].iterdir()))
         return extraction(path, version)
 
     monkeypatch.setattr(plugins, "extraction", counting)
