@@ -102,7 +102,7 @@ def test_restore_from_the_index_and_artifacts(root: Path) -> None:
 def test_lost_plugin_cache_without_artifacts(root: Path) -> None:
     plugin_index = (root / "plugins.jsonl").read_bytes()
     shutil.rmtree(root / "plugin-cache")
-    for artifact in (root / "dl").rglob("*.tar.gz"):
+    for artifact in (root / "dl").glob("*/*"):
         artifact.unlink()
 
     # Each version is reported, and every collection keeps the plugin lines it has.
@@ -183,7 +183,7 @@ def test_the_rest_are_extracted_again_too(root: Path) -> None:
 
 
 def test_missing_artifact(root: Path) -> None:
-    for artifact in (root / "dl").rglob("*.tar.gz"):
+    for artifact in (root / "dl").glob("*/*"):
         artifact.unlink()
 
     with pytest.raises(index.Error, match=r"which reading ns\.coll 1\.0\.0's artifact needs"):
@@ -191,7 +191,7 @@ def test_missing_artifact(root: Path) -> None:
 
 
 def test_artifact_isnt_the_one_named(root: Path) -> None:
-    for artifact in (root / "dl").rglob("*.tar.gz"):
+    for artifact in (root / "dl").glob("*/*"):
         artifact.write_bytes(b"other bytes")
 
     with pytest.raises(index.Error, match="its sha256 differs"):

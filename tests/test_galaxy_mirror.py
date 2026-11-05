@@ -217,7 +217,7 @@ def test_lost_plugin_cache_is_made_again_from_artifacts_on_disk(
 
     # Without its artifact, it's reported for the caller to fetch.
     (root / "plugin-cache" / "ns" / "coll.jsonl").unlink()
-    for artifact in (root / "dl").rglob("*.tar.gz"):
+    for artifact in (root / "dl").glob("*/*"):
         artifact.unlink()
     tree = index.Index(root)
     assert tree.galaxy_mirror(client, ["ns.coll"]) == []

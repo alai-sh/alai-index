@@ -32,7 +32,7 @@ The plugin index is at the optional `plugins` path in the format's entry in
       "plugins": "plugins.jsonl"
     }
   },
-  "dl": "https://dl.alai.sh/sha256/{sha256-prefix}/{sha256-checksum}.tar.gz",
+  "dl": "https://dl.alai.sh/sha256/{sha256-prefix}/{sha256-checksum}",
   "moved-to": null
 }
 ```

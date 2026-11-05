@@ -36,7 +36,7 @@ def test_add(tmp_path: Path, root: str, capsys: pytest.CaptureFixture[str]) -> N
         "written": {
             "dl": [],
             # The artifacts are a path in the index, so they're published with it, and first.
-            "index": [f"dl/{sha256[:2]}/{sha256}.tar.gz", "index/ns/coll.jsonl", "plugins.jsonl", "collections.json"],
+            "index": [f"dl/{sha256[:2]}/{sha256}", "index/ns/coll.jsonl", "plugins.jsonl", "collections.json"],
             "plugin-cache": ["ns/coll.jsonl"],
         },
         "deleted": {"dl": [], "index": [], "plugin-cache": []},
@@ -66,7 +66,7 @@ def test_remove(tmp_path: Path, root: str, capsys: pytest.CaptureFixture[str]) -
     ]
     assert out["deleted"] == {
         "dl": [],
-        "index": [f"dl/{sha256[:2]}/{sha256}.tar.gz", "index/ns/coll.jsonl"],
+        "index": [f"dl/{sha256[:2]}/{sha256}", "index/ns/coll.jsonl"],
         "plugin-cache": ["ns/coll.jsonl"],
     }
 

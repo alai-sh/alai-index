@@ -294,7 +294,7 @@ def _parser() -> argparse.ArgumentParser:
         "--dl-template",
         metavar="TEMPLATE",
         help="the URL clients download each artifact from, with {sha256-checksum} in it, by default the artifacts' "
-        + "directory as a path in the index, dl/{sha256-prefix}/{sha256-checksum}.tar.gz",
+        + "directory as a path in the index, dl/{sha256-prefix}/{sha256-checksum}",
     )
     config.add_argument(
         "--listing",
